@@ -11,6 +11,46 @@ use serde::Deserialize;
 use crate::Transaction;
 use crate::check_summay;
 
+/// The role assigned to a transaction after inter-account analysis.
+/// See CONTEXT.md for the full definition and priority rules.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TransactionClass {
+    /// Contributes to summary totals.
+    Countable,
+    /// Money moving between the user's own accounts — excluded from totals.
+    InternalTransfer,
+    /// Card top-up / card payment pair across accounts — excluded from totals.
+    CardPayment,
+    /// Non-negative side of a loan repayment pair — excluded from totals.
+    LoanRepaymentOnly,
+    /// Negative side of a loan repayment pair — counted in `loan_repayment_total`.
+    LoanRepaymentCounted,
+}
+
+/// Classifies every transaction by running all detector passes and embedding
+/// the result into `tx.class`.  Call this once, immediately after loading and
+/// sorting.  Priority: CardPayment > InternalTransfer > loan repayment variants
+/// > Countable.
+pub fn classify_transactions(transactions: &mut [Transaction]) {
+    let internal_flags = detect_internal_transfers(transactions);
+    let card_flags = detect_card_payments(transactions);
+    let loan_flags = detect_loan_repayments(transactions);
+
+    for (idx, tx) in transactions.iter_mut().enumerate() {
+        tx.class = if card_flags[idx] {
+            TransactionClass::CardPayment
+        } else if internal_flags[idx] {
+            TransactionClass::InternalTransfer
+        } else if loan_flags.related[idx] && !loan_flags.counted[idx] {
+            TransactionClass::LoanRepaymentOnly
+        } else if loan_flags.counted[idx] {
+            TransactionClass::LoanRepaymentCounted
+        } else {
+            TransactionClass::Countable
+        };
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct SummaryDefinition {
     pub name: String,
@@ -134,9 +174,6 @@ pub fn summarize_for_period(
 ) -> Result<Summary> {
     validate_summary_definitions(definitions)?;
     let compiled = compile_summary_definitions(definitions)?;
-    let internal_transfer_flags = detect_internal_transfers(transactions);
-    let card_payment_flags = detect_card_payments(transactions);
-    let loan_repayment_flags = detect_loan_repayments(transactions);
 
     let mut totals: Vec<SummaryItem> = compiled
         .iter()
@@ -151,16 +188,17 @@ pub fn summarize_for_period(
     let mut no_match_total = 0.0;
     let mut total = 0.0;
 
-    for (idx, tx) in transactions.iter().enumerate() {
+    for tx in transactions {
         if tx.date < period_start || tx.date > period_end {
             continue;
         }
 
-        if internal_transfer_flags[idx] || card_payment_flags[idx] {
-            continue;
-        }
-
-        if loan_repayment_flags.related[idx] && !loan_repayment_flags.counted[idx] {
+        if matches!(
+            tx.class,
+            TransactionClass::InternalTransfer
+                | TransactionClass::CardPayment
+                | TransactionClass::LoanRepaymentOnly
+        ) {
             continue;
         }
 
@@ -171,7 +209,7 @@ pub fn summarize_for_period(
         let amount = tx.amount.abs();
         total += amount;
 
-        if loan_repayment_flags.counted[idx] {
+        if tx.class == TransactionClass::LoanRepaymentCounted {
             loan_repayment_total += amount;
             continue;
         }
@@ -252,9 +290,6 @@ pub fn matched_transactions_for_period(
     period_end: NaiveDate,
     definitions: &[SummaryDefinition],
 ) -> Result<Vec<bool>> {
-    let internal_transfer_flags = detect_internal_transfers(transactions);
-    let card_payment_flags = detect_card_payments(transactions);
-    let loan_repayment_flags = detect_loan_repayments(transactions);
     let all_matches = matched_transactions(transactions, definitions)?;
 
     let mut matched = vec![false; transactions.len()];
@@ -262,9 +297,12 @@ pub fn matched_transactions_for_period(
         if tx.date < period_start
             || tx.date > period_end
             || tx.amount == 0.0
-            || internal_transfer_flags[idx]
-            || card_payment_flags[idx]
-            || (loan_repayment_flags.related[idx] && !loan_repayment_flags.counted[idx])
+            || matches!(
+                tx.class,
+                TransactionClass::InternalTransfer
+                    | TransactionClass::CardPayment
+                    | TransactionClass::LoanRepaymentOnly
+            )
         {
             continue;
         }
@@ -280,22 +318,22 @@ pub fn matched_transactions(
 ) -> Result<Vec<bool>> {
     validate_summary_definitions(definitions)?;
     let compiled = compile_summary_definitions(definitions)?;
-    let internal_transfer_flags = detect_internal_transfers(transactions);
-    let card_payment_flags = detect_card_payments(transactions);
-    let loan_repayment_flags = detect_loan_repayments(transactions);
 
     let mut matched = vec![false; transactions.len()];
     for (idx, tx) in transactions.iter().enumerate() {
         if tx.amount == 0.0
-            || internal_transfer_flags[idx]
-            || card_payment_flags[idx]
-            || (loan_repayment_flags.related[idx] && !loan_repayment_flags.counted[idx])
+            || matches!(
+                tx.class,
+                TransactionClass::InternalTransfer
+                    | TransactionClass::CardPayment
+                    | TransactionClass::LoanRepaymentOnly
+            )
         {
             continue;
         }
 
         let text = searchable_text(tx);
-        matched[idx] = loan_repayment_flags.counted[idx]
+        matched[idx] = tx.class == TransactionClass::LoanRepaymentCounted
             || compiled.iter().any(|def| def.regex.is_match(&text));
     }
 
@@ -308,21 +346,21 @@ pub fn matched_summary_names(
 ) -> Result<Vec<Option<String>>> {
     validate_summary_definitions(definitions)?;
     let compiled = compile_summary_definitions(definitions)?;
-    let internal_transfer_flags = detect_internal_transfers(transactions);
-    let card_payment_flags = detect_card_payments(transactions);
-    let loan_repayment_flags = detect_loan_repayments(transactions);
 
     let mut names = vec![None; transactions.len()];
     for (idx, tx) in transactions.iter().enumerate() {
         if tx.amount == 0.0
-            || internal_transfer_flags[idx]
-            || card_payment_flags[idx]
-            || (loan_repayment_flags.related[idx] && !loan_repayment_flags.counted[idx])
+            || matches!(
+                tx.class,
+                TransactionClass::InternalTransfer
+                    | TransactionClass::CardPayment
+                    | TransactionClass::LoanRepaymentOnly
+            )
         {
             continue;
         }
 
-        if loan_repayment_flags.counted[idx] {
+        if tx.class == TransactionClass::LoanRepaymentCounted {
             names[idx] = Some(LOAN_REPAYMENT_SUMMARY_NAME.to_string());
             continue;
         }
@@ -614,6 +652,7 @@ mod tests {
                 unique_id: "202504020001".into(),
                 source_file: "test.csv".into(),
                 source_line: 2,
+                class: TransactionClass::Countable,
             },
             Transaction {
                 account_number: "1".into(),
@@ -631,6 +670,7 @@ mod tests {
                 unique_id: "202505150001".into(),
                 source_file: "test.csv".into(),
                 source_line: 3,
+                class: TransactionClass::Countable,
             },
             Transaction {
                 account_number: "1".into(),
@@ -648,6 +688,7 @@ mod tests {
                 unique_id: "202506010001".into(),
                 source_file: "test.csv".into(),
                 source_line: 4,
+                class: TransactionClass::Countable,
             },
         ];
 
@@ -686,6 +727,7 @@ mod tests {
             unique_id: "202504100001".into(),
             source_file: "test.csv".into(),
             source_line: 2,
+            class: TransactionClass::Countable,
         }];
 
         let start = NaiveDate::from_ymd_opt(2025, 4, 1).unwrap();
@@ -773,6 +815,7 @@ mod tests {
                 unique_id: "202504020001".into(),
                 source_file: "test.csv".into(),
                 source_line: 2,
+                class: TransactionClass::Countable,
             },
             Transaction {
                 account_number: "1".into(),
@@ -790,6 +833,7 @@ mod tests {
                 unique_id: "202504030001".into(),
                 source_file: "test.csv".into(),
                 source_line: 3,
+                class: TransactionClass::Countable,
             },
             Transaction {
                 account_number: "1".into(),
@@ -807,6 +851,7 @@ mod tests {
                 unique_id: "202506010001".into(),
                 source_file: "test.csv".into(),
                 source_line: 4,
+                class: TransactionClass::Countable,
             },
         ];
 
@@ -837,6 +882,7 @@ mod tests {
                 unique_id: "202504020001".into(),
                 source_file: "test.csv".into(),
                 source_line: 2,
+                class: TransactionClass::Countable,
             },
             Transaction {
                 account_number: "1".into(),
@@ -854,6 +900,7 @@ mod tests {
                 unique_id: "202506010001".into(),
                 source_file: "test.csv".into(),
                 source_line: 3,
+                class: TransactionClass::Countable,
             },
         ];
 
@@ -882,6 +929,7 @@ mod tests {
                 unique_id: "202504020001".into(),
                 source_file: "test.csv".into(),
                 source_line: 2,
+                class: TransactionClass::Countable,
             },
             Transaction {
                 account_number: "1".into(),
@@ -899,6 +947,7 @@ mod tests {
                 unique_id: "202504030001".into(),
                 source_file: "test.csv".into(),
                 source_line: 3,
+                class: TransactionClass::Countable,
             },
         ];
 
@@ -911,7 +960,7 @@ mod tests {
 
     #[test]
     fn detects_and_excludes_internal_transfers_from_summary_totals() {
-        let txs = vec![
+        let mut txs = vec![
             Transaction {
                 account_number: "A".into(),
                 date: NaiveDate::from_ymd_opt(2026, 4, 12).unwrap(),
@@ -928,6 +977,7 @@ mod tests {
                 unique_id: "202604120001".into(),
                 source_file: "a.csv".into(),
                 source_line: 2,
+                class: TransactionClass::Countable,
             },
             Transaction {
                 account_number: "B".into(),
@@ -945,6 +995,7 @@ mod tests {
                 unique_id: "202604120001".into(),
                 source_file: "b.csv".into(),
                 source_line: 2,
+                class: TransactionClass::Countable,
             },
             Transaction {
                 account_number: "A".into(),
@@ -962,12 +1013,14 @@ mod tests {
                 unique_id: "202604130001".into(),
                 source_file: "a.csv".into(),
                 source_line: 3,
+                class: TransactionClass::Countable,
             },
         ];
 
         let flags = detect_internal_transfers(&txs);
         assert_eq!(flags, vec![true, true, false]);
 
+        classify_transactions(&mut txs);
         let start = NaiveDate::from_ymd_opt(2026, 4, 1).unwrap();
         let end = NaiveDate::from_ymd_opt(2026, 5, 31).unwrap();
         let definitions = default_summary_definitions();
@@ -998,6 +1051,7 @@ mod tests {
                 unique_id: "202504290001".into(),
                 source_file: "a.csv".into(),
                 source_line: 2,
+                class: TransactionClass::Countable,
             },
             Transaction {
                 account_number: "0304060790348000".into(),
@@ -1015,6 +1069,7 @@ mod tests {
                 unique_id: "202504290002".into(),
                 source_file: "b.csv".into(),
                 source_line: 2,
+                class: TransactionClass::Countable,
             },
         ];
 
@@ -1024,7 +1079,7 @@ mod tests {
 
     #[test]
     fn detects_and_excludes_card_payments_from_summary_totals() {
-        let txs = vec![
+        let mut txs = vec![
             Transaction {
                 account_number: "CARD".into(),
                 date: NaiveDate::from_ymd_opt(2025, 4, 10).unwrap(),
@@ -1041,6 +1096,7 @@ mod tests {
                 unique_id: "202504100001".into(),
                 source_file: "card.csv".into(),
                 source_line: 2,
+                class: TransactionClass::Countable,
             },
             Transaction {
                 account_number: "BANK".into(),
@@ -1058,6 +1114,7 @@ mod tests {
                 unique_id: "202504100002".into(),
                 source_file: "bank.csv".into(),
                 source_line: 2,
+                class: TransactionClass::Countable,
             },
             Transaction {
                 account_number: "BANK".into(),
@@ -1075,12 +1132,14 @@ mod tests {
                 unique_id: "202504110001".into(),
                 source_file: "bank.csv".into(),
                 source_line: 3,
+                class: TransactionClass::Countable,
             },
         ];
 
         let flags = detect_card_payments(&txs);
         assert_eq!(flags, vec![true, true, false]);
 
+        classify_transactions(&mut txs);
         let start = NaiveDate::from_ymd_opt(2025, 4, 1).unwrap();
         let end = NaiveDate::from_ymd_opt(2025, 5, 31).unwrap();
         let definitions = default_summary_definitions();
@@ -1094,7 +1153,7 @@ mod tests {
 
     #[test]
     fn detects_loan_repayments_and_counts_only_negative_rows() {
-        let txs = vec![
+        let mut txs = vec![
             Transaction {
                 account_number: "0304060790348000".into(),
                 date: NaiveDate::from_ymd_opt(2025, 6, 21).unwrap(),
@@ -1111,6 +1170,7 @@ mod tests {
                 unique_id: "202506210001".into(),
                 source_file: "loan.csv".into(),
                 source_line: 2,
+                class: TransactionClass::Countable,
             },
             Transaction {
                 account_number: "0304060790348091".into(),
@@ -1128,6 +1188,7 @@ mod tests {
                 unique_id: "202506210001".into(),
                 source_file: "loan.csv".into(),
                 source_line: 3,
+                class: TransactionClass::Countable,
             },
             Transaction {
                 account_number: "0304060790348000".into(),
@@ -1145,6 +1206,7 @@ mod tests {
                 unique_id: "202506210002".into(),
                 source_file: "loan.csv".into(),
                 source_line: 4,
+                class: TransactionClass::Countable,
             },
         ];
 
@@ -1152,6 +1214,7 @@ mod tests {
         assert_eq!(flags.related, vec![true, true, true]);
         assert_eq!(flags.counted, vec![true, false, true]);
 
+        classify_transactions(&mut txs);
         let defs = default_summary_definitions();
         let names = matched_summary_names(&txs, &defs).unwrap();
         assert_eq!(names, vec![Some("loan_repayment_total".into()), None, Some("loan_repayment_total".into())]);
@@ -1172,7 +1235,7 @@ mod tests {
 
     #[test]
     fn detects_payment_received_card_charge_without_reference_match() {
-        let txs = vec![
+        let mut txs = vec![
             Transaction {
                 account_number: "0000000003071972735".into(),
                 date: NaiveDate::from_ymd_opt(2025, 9, 10).unwrap(),
@@ -1189,6 +1252,7 @@ mod tests {
                 unique_id: "202509100001".into(),
                 source_file: "card.csv".into(),
                 source_line: 46,
+                class: TransactionClass::Countable,
             },
             Transaction {
                 account_number: "0304060790348000".into(),
@@ -1206,12 +1270,14 @@ mod tests {
                 unique_id: "202509100002".into(),
                 source_file: "bank.csv".into(),
                 source_line: 96,
+                class: TransactionClass::Countable,
             },
         ];
 
         let flags = detect_card_payments(&txs);
         assert_eq!(flags, vec![true, true]);
 
+        classify_transactions(&mut txs);
         let defs = default_summary_definitions();
         let names = matched_summary_names(&txs, &defs).unwrap();
         assert_eq!(names, vec![None, None]);
@@ -1236,6 +1302,7 @@ mod tests {
                 unique_id: "202504020001".into(),
                 source_file: "file_a.csv".into(),
                 source_line: 8,
+                class: TransactionClass::Countable,
             },
             Transaction {
                 account_number: "1".into(),
@@ -1253,6 +1320,7 @@ mod tests {
                 unique_id: "202504030001".into(),
                 source_file: "file_b.csv".into(),
                 source_line: 14,
+                class: TransactionClass::Countable,
             },
         ];
 

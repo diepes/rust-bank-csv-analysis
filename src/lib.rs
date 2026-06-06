@@ -11,7 +11,8 @@ pub mod calc_summary;
 pub mod check_summay;
 
 pub use calc_summary::{
-    Summary, SummaryDefinition, default_summary_definitions, detect_card_payments,
+    Summary, SummaryDefinition, TransactionClass, classify_transactions,
+    default_summary_definitions, detect_card_payments,
     detect_internal_transfers, detect_loan_repayments, load_summary_definitions,
     matched_summary_names, matched_transactions, matched_transactions_for_period,
     summarize_for_period,
@@ -36,6 +37,8 @@ pub struct Transaction {
     pub unique_id: String,
     pub source_file: String,
     pub source_line: usize,
+    /// Assigned by `classify_transactions` after loading and sorting.
+    pub class: TransactionClass,
 }
 
 #[derive(Debug, Deserialize)]
@@ -96,18 +99,23 @@ impl TryFrom<RawTransaction> for Transaction {
             unique_id: value.unique_id,
             source_file: String::new(),
             source_line: 0,
+            class: TransactionClass::Countable,
         })
     }
 }
 
 pub fn read_transactions(paths: &[impl AsRef<Path>]) -> Result<Vec<Transaction>> {
-    read_transactions_with_summary_definitions(paths, None)
+    read_transactions_from_paths(paths)
 }
 
 pub fn read_transactions_with_summary_definitions(
     paths: &[impl AsRef<Path>],
     _summary_definitions: Option<&[SummaryDefinition]>,
 ) -> Result<Vec<Transaction>> {
+    read_transactions_from_paths(paths)
+}
+
+fn read_transactions_from_paths(paths: &[impl AsRef<Path>]) -> Result<Vec<Transaction>> {
     let mut all = Vec::new();
 
     for path in paths {
@@ -152,6 +160,7 @@ pub fn read_transactions_with_summary_definitions(
             .cmp(&b.date)
             .then_with(|| a.unique_id.cmp(&b.unique_id))
     });
+    classify_transactions(&mut all);
     Ok(all)
 }
 
@@ -204,9 +213,6 @@ pub fn write_xlsx(
     let mut workbook = Workbook::new();
     let worksheet = workbook.add_worksheet();
     worksheet.set_name("Transactions")?;
-    let internal_transfer_flags = detect_internal_transfers(transactions);
-    let card_payment_flags = detect_card_payments(transactions);
-    let loan_repayment_flags = detect_loan_repayments(transactions);
     let matched_summary_names = matched_summary_names(transactions, summary_definitions)?;
     let matched_rows: Vec<bool> = matched_summary_names
         .iter()
@@ -280,26 +286,34 @@ pub fn write_xlsx(
 
     for (idx, tx) in transactions.iter().enumerate() {
         let row = (idx + 1) as u32;
-        if loan_repayment_flags.related[idx] {
-            worksheet.set_row_format(row, &loan_repayment_format)?;
-        } else if card_payment_flags[idx] {
-            worksheet.set_row_format(row, &card_payment_format)?;
-        } else if internal_transfer_flags[idx] {
-            worksheet.set_row_format(row, &internal_transfer_format)?;
-        } else if matched_rows[idx] {
-            if let Some(summary_name) = matched_summary_names[idx].as_deref() {
-                if let Some(rgb) = summary_colors.get(summary_name) {
-                    let summary_color_format = Format::new().set_background_color(Color::RGB(*rgb));
-                    worksheet.set_row_format(row, &summary_color_format)?;
-                } else if matched_rows_in_period[idx] {
-                    worksheet.set_row_format(row, &matched_in_period_format)?;
-                } else {
-                    worksheet.set_row_format(row, &matched_outside_period_format)?;
+        match tx.class {
+            TransactionClass::CardPayment => {
+                worksheet.set_row_format(row, &card_payment_format)?;
+            }
+            TransactionClass::InternalTransfer => {
+                worksheet.set_row_format(row, &internal_transfer_format)?;
+            }
+            TransactionClass::LoanRepaymentCounted | TransactionClass::LoanRepaymentOnly => {
+                worksheet.set_row_format(row, &loan_repayment_format)?;
+            }
+            TransactionClass::Countable => {
+                if matched_rows[idx] {
+                    if let Some(summary_name) = matched_summary_names[idx].as_deref() {
+                        if let Some(rgb) = summary_colors.get(summary_name) {
+                            let summary_color_format =
+                                Format::new().set_background_color(Color::RGB(*rgb));
+                            worksheet.set_row_format(row, &summary_color_format)?;
+                        } else if matched_rows_in_period[idx] {
+                            worksheet.set_row_format(row, &matched_in_period_format)?;
+                        } else {
+                            worksheet.set_row_format(row, &matched_outside_period_format)?;
+                        }
+                    } else if matched_rows_in_period[idx] {
+                        worksheet.set_row_format(row, &matched_in_period_format)?;
+                    } else {
+                        worksheet.set_row_format(row, &matched_outside_period_format)?;
+                    }
                 }
-            } else if matched_rows_in_period[idx] {
-                worksheet.set_row_format(row, &matched_in_period_format)?;
-            } else {
-                worksheet.set_row_format(row, &matched_outside_period_format)?;
             }
         }
         worksheet.write_string(row, 0, &tx.account_number)?;
@@ -315,14 +329,21 @@ pub fn write_xlsx(
         worksheet.write_string(row, 10, &tx.serial_number)?;
         worksheet.write_string(row, 11, &tx.account_code)?;
         worksheet.write_string(row, 12, &tx.unique_id)?;
-        if loan_repayment_flags.counted[idx] {
-            worksheet.write_string(row, 13, "loan_repayment_total")?;
-        } else if card_payment_flags[idx] {
-            worksheet.write_string(row, 13, "card_payment")?;
-        } else if internal_transfer_flags[idx] {
-            worksheet.write_string(row, 13, "transfer_internal")?;
-        } else if let Some(summary_name) = &matched_summary_names[idx] {
-            worksheet.write_string(row, 13, summary_name)?;
+        match tx.class {
+            TransactionClass::LoanRepaymentCounted => {
+                worksheet.write_string(row, 13, "loan_repayment_total")?;
+            }
+            TransactionClass::CardPayment => {
+                worksheet.write_string(row, 13, "card_payment")?;
+            }
+            TransactionClass::InternalTransfer => {
+                worksheet.write_string(row, 13, "transfer_internal")?;
+            }
+            _ => {
+                if let Some(summary_name) = &matched_summary_names[idx] {
+                    worksheet.write_string(row, 13, summary_name)?;
+                }
+            }
         }
     }
 
