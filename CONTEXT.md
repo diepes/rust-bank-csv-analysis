@@ -26,3 +26,17 @@ Classification priority when a transaction matches multiple detectors: `CardPaym
 **Loan Repayment Detection** — identifies groups of transactions on the same date with a matching loan-repayment signature, where at least one side is negative. The negative side(s) become `LoanRepaymentCounted`; others become `LoanRepaymentOnly`.
 
 **Classification** — the process of running Transfer Detection and Loan Repayment Detection across the full loaded and sorted transaction list and embedding the result as a `TransactionClass` on each `Transaction`. Classification happens once, immediately after loading and sorting; downstream modules read `tx.class` rather than re-deriving it.
+
+## Code Structure
+
+```
+src/
+  main.rs               CLI entry point (arg parsing, orchestration)
+  lib.rs                Public API: re-exports, Transaction struct, CSV reading, XLSX writing
+  calc_summary/
+    mod.rs              Re-exports all public symbols; integration tests
+    types.rs            Data types: TransactionClass, SummaryDefinition, SummaryItem, Summary, LoanRepaymentFlags
+    detection.rs        detect_internal_transfers, detect_card_payments, detect_loan_repayments, classify_transactions
+    summary.rs          summarize_for_period, matched_* helpers, validate_summary_definitions, parse_summary_color
+    config.rs           load_summary_definitions, default_summary_definitions, YAML parsing
+```

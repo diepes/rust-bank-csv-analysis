@@ -29,31 +29,41 @@ classification was recomputed on every call.
 
 ---
 
-## Remaining Candidates
+### ✅ #2 — Split `calc_summary` into focused submodules
 
-### #3 — Remove dead parameter from `read_transactions_with_summary_definitions`
+**Problem:** `src/calc_summary.rs` had grown to ~52 KB mixing detection heuristics,
+classification, summary calculation, YAML config parsing, and validation in one file.
+Finding a function required skimming the entire file, and tests were collapsed into one
+large block making it hard to see which behaviour each test covered.
 
-**Files:** `src/lib.rs`
+**What was done:**
+- Converted `src/calc_summary.rs` into a module directory `src/calc_summary/` with four
+  focused submodules:
 
-**Problem:** `read_transactions_with_summary_definitions` accepts
-`_summary_definitions: Option<&[SummaryDefinition]>` but immediately ignores it
-(note the `_` prefix). `main.rs` passes `Some(&summary_definitions)` but it is silently
-dropped. The interface promises a capability it does not deliver.
+  | Submodule         | Responsibility |
+  |-------------------|----------------|
+  | `types.rs`        | Public data types: `TransactionClass`, `SummaryDefinition`, `SummaryItem`, `Summary`, `LoanRepaymentFlags` |
+  | `detection.rs`    | All three detectors (`detect_internal_transfers`, `detect_card_payments`, `detect_loan_repayments`) plus `classify_transactions` and private heuristic helpers |
+  | `summary.rs`      | `summarize_for_period`, matching helpers, `validate_summary_definitions`, `parse_summary_color`, and private `compile_summary_definitions` / `searchable_text` |
+  | `config.rs`       | YAML loading (`load_summary_definitions`) and built-in defaults (`default_summary_definitions`) |
 
-**Solution:** Remove the `_summary_definitions` parameter (or implement it).
-Update the one call site in `main.rs` to call `read_transactions` directly.
-Keep the public name as an alias if backward compatibility matters, or delete it.
-
-**Note:** `read_transactions_with_summary_definitions` is still exported via `pub use` —
-check whether any external caller uses it before removing.
+- `mod.rs` re-exports all public symbols so the external API (via `lib.rs`) is unchanged.
+- Tests were distributed to the submodule they cover; integration tests that span multiple
+  modules live in `calc_summary::tests` (mod.rs).
+- Introduced a `tx()` helper in `summary.rs` tests and a richer one in `mod.rs` tests to
+  reduce `Transaction` construction boilerplate.
+- All 23 tests pass; no public API changes.
 
 ---
 
-### #4 — Extract shared pair-detection scaffold
+## Remaining Candidates
 
-**Files:** `src/calc_summary.rs` — `detect_internal_transfers`, `detect_card_payments`
+### #3 — Extract shared pair-detection scaffold
 
-**Problem:** Both functions share an identical structure:
+**Files:** `src/calc_summary/detection.rs`
+
+**Problem:** `detect_internal_transfers` and `detect_card_payments` share an identical
+scaffold:
 1. Build `HashMap<(NaiveDate, i64), Vec<usize>>` grouping by `(date, abs-amount-cents)`
 2. Nested `i×j` pair loop
 3. Check accounts differ and signs differ
@@ -65,7 +75,7 @@ logic (e.g. the cross-account check) would need fixing in two places.
 **Solution:** Extract a private function:
 
 ```rust
-fn candidate_pairs<'a>(transactions: &'a [Transaction]) -> impl Iterator<Item=(usize, usize)> + 'a
+fn candidate_pairs(transactions: &[Transaction]) -> impl Iterator<Item=(usize, usize)> + '_
 ```
 
 It should yield all `(i, j)` index pairs where accounts differ, signs differ, same date,
@@ -74,33 +84,7 @@ become a filter over that iterator with their respective predicates.
 
 ---
 
-### #5 — Merge `check_summay` into `calc_summary` (fixes typo too)
-
-**Files:** `src/check_summay.rs` (typo — should be `check_summary`),
-`src/calc_summary.rs`, `src/lib.rs`
-
-**Problem:** `check_summay::check_summary_definitions` validates duplicates, regex
-safety, and colors. `calc_summary::validate_summary_definitions` calls that and adds:
-non-empty list, reserved name checks, non-empty regex. The split is arbitrary — callers
-inside `calc_summary.rs` must know to call both. The module also has a typo in its name.
-`parse_summary_color` is called directly from `write_xlsx` in `lib.rs`.
-
-**Solution:**
-1. Move `check_summary_definitions` and `parse_summary_color` into `calc_summary.rs`.
-2. Merge `check_summary_definitions` into `validate_summary_definitions` so there is one
-   complete validation function.
-3. Re-export `parse_summary_color` from `calc_summary` (or `lib.rs`) so `write_xlsx`
-   can still call it.
-4. Delete `src/check_summay.rs` and remove `pub mod check_summay` from `lib.rs`.
-5. Move the `check_summay` tests into `calc_summary` tests.
-
-**Watch out for:** `pub mod check_summay` makes the module part of the public API. Check
-whether any external caller uses `rust_bank_csv_analysis::check_summay::parse_summary_color`
-before deleting it.
-
----
-
 ## Suggested order
 
-#3 first (trivial, removes a misleading interface), then #5 (moderate, cleans up a real
-naming bug and merges split logic), then #4 (most structural, extracts a reusable scaffold).
+#3 (moderate, removes copy-pasted pair-detection scaffold).
+

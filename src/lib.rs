@@ -8,14 +8,13 @@ use rust_xlsxwriter::{Color, Format, Workbook};
 use serde::Deserialize;
 
 pub mod calc_summary;
-pub mod check_summay;
 
 pub use calc_summary::{
     Summary, SummaryDefinition, TransactionClass, classify_transactions,
     default_summary_definitions, detect_card_payments,
     detect_internal_transfers, detect_loan_repayments, load_summary_definitions,
     matched_summary_names, matched_transactions, matched_transactions_for_period,
-    summarize_for_period,
+    parse_summary_color, summarize_for_period,
 };
 
 const DATE_FMT: &str = "%Y%m%d";
@@ -223,7 +222,7 @@ pub fn write_xlsx(
         .filter_map(|def| {
             def.color
                 .as_deref()
-                .and_then(|value| check_summay::parse_summary_color(value).ok())
+                .and_then(|value| parse_summary_color(value).ok())
                 .map(|rgb| (def.name.as_str(), rgb))
         })
         .collect();
