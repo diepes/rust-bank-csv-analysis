@@ -9,11 +9,9 @@ pub mod calc_summary;
 pub mod xlsx;
 
 pub use calc_summary::{
-    Summary, SummaryDefinition, TransactionClass, classify_transactions,
-    default_summary_definitions, detect_card_payments,
-    detect_internal_transfers, detect_loan_repayments, load_summary_definitions,
-    matched_summary_names, matched_transactions, matched_transactions_for_period,
-    parse_summary_color, summarize_for_period,
+    CompiledSummarySet, Summary, SummaryDefinition, TransactionClass, classify_transactions,
+    default_summary_definitions, detect_card_payments, detect_internal_transfers,
+    detect_loan_repayments, load_summary_definitions, parse_summary_color,
 };
 pub use xlsx::write_xlsx;
 
@@ -107,7 +105,6 @@ pub fn read_transactions(paths: &[impl AsRef<Path>]) -> Result<Vec<Transaction>>
     read_transactions_from_paths(paths)
 }
 
-
 fn read_transactions_from_paths(paths: &[impl AsRef<Path>]) -> Result<Vec<Transaction>> {
     let mut all = Vec::new();
 
@@ -170,8 +167,8 @@ pub fn latest_full_tax_year_start() -> i32 {
 }
 
 pub fn latest_full_tax_year_start_for_date(today: NaiveDate) -> i32 {
-    let current_year_apr_1 = NaiveDate::from_ymd_opt(today.year(), 4, 1)
-        .expect("valid date for 1 April");
+    let current_year_apr_1 =
+        NaiveDate::from_ymd_opt(today.year(), 4, 1).expect("valid date for 1 April");
 
     if today >= current_year_apr_1 {
         today.year() - 1
@@ -258,6 +255,9 @@ mod tests {
         assert!(txs.iter().any(|tx| tx.unique_id == "a2"));
         assert!(txs.iter().any(|tx| tx.unique_id == "b1"));
         assert!(txs.iter().any(|tx| tx.unique_id == "b2"));
-        assert!(txs.iter().all(|tx| tx.source_line == 2 || tx.source_line == 3));
+        assert!(
+            txs.iter()
+                .all(|tx| tx.source_line == 2 || tx.source_line == 3)
+        );
     }
 }

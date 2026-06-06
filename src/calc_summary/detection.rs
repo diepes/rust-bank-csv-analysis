@@ -77,7 +77,9 @@ fn looks_like_loan_repayment_candidate(tx: &Transaction) -> bool {
         tx.reference.as_str(),
     ];
 
-    fields.iter().any(|value| value.to_lowercase().contains("loan repayment"))
+    fields
+        .iter()
+        .any(|value| value.to_lowercase().contains("loan repayment"))
 }
 
 fn loan_repayment_signature(tx: &Transaction) -> String {
@@ -92,7 +94,11 @@ fn loan_repayment_signature(tx: &Transaction) -> String {
 }
 
 fn normalize_signature_piece(value: &str) -> String {
-    value.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+    value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
 }
 
 /// Yields all `(i, j)` index pairs (i < j) where the two transactions are on the
@@ -139,14 +145,15 @@ pub fn detect_internal_transfers(transactions: &[Transaction]) -> Vec<bool> {
         let same_reference = !a.reference.trim().is_empty()
             && a.reference.trim().eq_ignore_ascii_case(b.reference.trim());
         let same_particulars = !a.particulars.trim().is_empty()
-            && a.particulars.trim().eq_ignore_ascii_case(b.particulars.trim());
+            && a.particulars
+                .trim()
+                .eq_ignore_ascii_case(b.particulars.trim());
         let payment_received_card_pair = (looks_like_payment_received(a)
             && looks_like_card_transfer_outgoing(b))
             || (looks_like_payment_received(b) && looks_like_card_transfer_outgoing(a));
         let from_to_pair = (looks_like_from_account_counterparty(a)
             && looks_like_to_account_counterparty(b))
-            || (looks_like_from_account_counterparty(b)
-                && looks_like_to_account_counterparty(a));
+            || (looks_like_from_account_counterparty(b) && looks_like_to_account_counterparty(a));
 
         if payment_received_card_pair
             || ((has_transfer_code || from_to_pair)
@@ -200,8 +207,8 @@ fn looks_like_card_transfer_outgoing(tx: &Transaction) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::NaiveDate;
     use crate::Transaction;
+    use chrono::NaiveDate;
 
     #[test]
     fn detects_internal_transfer_without_transfer_analysis_code() {

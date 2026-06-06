@@ -6,11 +6,8 @@ use chrono::NaiveDate;
 use rust_xlsxwriter::{Color, Format, Workbook};
 
 use crate::{
-    Transaction, DATE_FMT,
-    calc_summary::{
-        Summary, SummaryDefinition, TransactionClass,
-        matched_summary_names, matched_transactions_for_period, parse_summary_color,
-    },
+    DATE_FMT, Transaction,
+    calc_summary::{CompiledSummarySet, Summary, TransactionClass},
 };
 
 pub fn write_xlsx(
@@ -18,7 +15,7 @@ pub fn write_xlsx(
     transactions: &[Transaction],
     period_start: NaiveDate,
     period_end: NaiveDate,
-    summary_definitions: &[SummaryDefinition],
+    summary_set: &CompiledSummarySet,
     summary: &Summary,
 ) -> Result<()> {
     let mut workbook = Workbook::new();
@@ -27,7 +24,7 @@ pub fn write_xlsx(
         transactions,
         period_start,
         period_end,
-        summary_definitions,
+        summary_set,
     )?;
     write_summary_sheet(&mut workbook, period_start, period_end, summary)?;
     workbook
@@ -41,24 +38,16 @@ fn write_transactions_sheet(
     transactions: &[Transaction],
     period_start: NaiveDate,
     period_end: NaiveDate,
-    summary_definitions: &[SummaryDefinition],
+    summary_set: &CompiledSummarySet,
 ) -> Result<()> {
     let worksheet = workbook.add_worksheet();
     worksheet.set_name("Transactions")?;
 
-    let matched_names = matched_summary_names(transactions, summary_definitions)?;
+    let matched_names = summary_set.matched_summary_names(transactions);
     let matched_in_period =
-        matched_transactions_for_period(transactions, period_start, period_end, summary_definitions)?;
+        summary_set.matched_transactions_for_period(transactions, period_start, period_end);
 
-    let summary_colors: HashMap<&str, u32> = summary_definitions
-        .iter()
-        .filter_map(|def| {
-            def.color
-                .as_deref()
-                .and_then(|v| parse_summary_color(v).ok())
-                .map(|rgb| (def.name.as_str(), rgb))
-        })
-        .collect();
+    let summary_colors: HashMap<String, u32> = summary_set.color_map().into_iter().collect();
 
     let fmt_matched_in_period = Format::new().set_background_color(Color::RGB(0xE2F0D9));
     let fmt_matched_outside_period = Format::new().set_background_color(Color::RGB(0xC6EFD6));

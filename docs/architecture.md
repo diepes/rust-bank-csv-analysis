@@ -93,6 +93,33 @@ colour logic, and sheet layout were buried in the general-purpose library entry 
 
 ---
 
+## Planned
+
+### ✅ #5 — Introduce `CompiledSummarySet` to eliminate repeated validate+compile
+
+**Problem:** In a single run, `summarize_for_period`, `matched_summary_names`, and
+`matched_transactions_for_period` → `matched_transactions` each independently called
+`validate_summary_definitions` + `compile_summary_definitions` on the same definitions
+slice — 3× compiles (and 3× regex builds) per run.
+
+**What was done:**
+- Added `pub struct CompiledSummarySet` in `summary.rs` with a `compile(definitions)` constructor
+  that validates and builds the regex set exactly once. The struct also carries `color` per entry
+  (needed by `xlsx.rs`), exposed via a `color_map()` method.
+- Moved the bodies of `summarize_for_period`, `matched_transactions`,
+  `matched_transactions_for_period`, and `matched_summary_names` onto `CompiledSummarySet`
+  as `pub` methods (the `definitions` parameter is gone — `self` owns the compiled set).
+  The `matched_*` methods are now infallible (`Vec<…>` not `Result<Vec<…>>`).
+- Kept the four free functions as one-liner shims during the transition (API stability gate),
+  then removed them along with their `pub use` re-exports from `mod.rs` and `lib.rs`.
+- Updated `main.rs` to compile once and call methods directly.
+- Updated `xlsx.rs` to accept `&CompiledSummarySet` instead of `&[SummaryDefinition]`.
+- Updated all tests in `summary.rs` and `mod.rs` to use `CompiledSummarySet` directly.
+- All 23 tests pass; `CompiledSummarySet` is now the sole public entry point for
+  summary matching and period totalling.
+
+---
+
 ## Remaining Candidates
 
 *(none at this time)*

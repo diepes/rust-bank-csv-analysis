@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 
 use super::summary::validate_summary_definitions;
-use super::types::{default_lock_sign_on_first_match, SummaryDefinition};
+use super::types::{SummaryDefinition, default_lock_sign_on_first_match};
 
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]

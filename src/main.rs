@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::Parser;
 use rust_bank_csv_analysis::{
-    latest_full_tax_year_start, nz_period_for_year, read_transactions,
-    resolve_summary_definitions, summarize_for_period, write_xlsx,
+    CompiledSummarySet, latest_full_tax_year_start, nz_period_for_year, read_transactions,
+    resolve_summary_definitions, write_xlsx,
 };
 
 #[derive(Parser, Debug)]
@@ -28,23 +28,19 @@ fn run() -> Result<()> {
     let cli = Cli::parse();
     let summary_definitions = resolve_summary_definitions(cli.summary_config.as_ref())?;
     let transactions = read_transactions(&cli.csv_files)?;
+    let summary_set = CompiledSummarySet::compile(&summary_definitions)?;
 
     let start_year = cli
         .tax_year_start
         .unwrap_or_else(latest_full_tax_year_start);
     let (period_start, period_end) = nz_period_for_year(start_year)?;
-    let summary = summarize_for_period(
-        &transactions,
-        period_start,
-        period_end,
-        &summary_definitions,
-    )?;
+    let summary = summary_set.summarize_for_period(&transactions, period_start, period_end)?;
     write_xlsx(
         &cli.output,
         &transactions,
         period_start,
         period_end,
-        &summary_definitions,
+        &summary_set,
         &summary,
     )?;
 

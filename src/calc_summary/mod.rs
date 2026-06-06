@@ -5,20 +5,16 @@ pub(crate) mod types;
 
 pub use config::{default_summary_definitions, load_summary_definitions};
 pub use detection::{
-    classify_transactions, detect_card_payments, detect_internal_transfers,
-    detect_loan_repayments,
+    classify_transactions, detect_card_payments, detect_internal_transfers, detect_loan_repayments,
 };
-pub use summary::{
-    matched_summary_names, matched_transactions, matched_transactions_for_period,
-    parse_summary_color, summarize_for_period,
-};
+pub use summary::{CompiledSummarySet, parse_summary_color};
 pub use types::{LoanRepaymentFlags, Summary, SummaryDefinition, SummaryItem, TransactionClass};
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::NaiveDate;
     use crate::Transaction;
+    use chrono::NaiveDate;
 
     fn tx(
         account: &str,
@@ -57,9 +53,45 @@ mod tests {
     fn detects_and_excludes_internal_transfers_from_summary_totals() {
         let d = |y, m, d| NaiveDate::from_ymd_opt(y, m, d).unwrap();
         let mut txs = vec![
-            tx("A", d(2026, 4, 12), -50.0, "ONLINE BANKING", "To 1395-0292849-00", "Lunch NewJob", "TRANSFER", "12:45-753463", "u1", "a.csv", 2),
-            tx("B", d(2026, 4, 12),  50.0, "DIRECT CREDIT",  "FRM 0406-0790348-00", "Lunch NewJob", "TRANSFER", "12:45-753463", "u2", "b.csv", 2),
-            tx("A", d(2026, 4, 13), -120.0, "AUTOMATIC PAYMENT", "Power Co", "", "", "abc", "u3", "a.csv", 3),
+            tx(
+                "A",
+                d(2026, 4, 12),
+                -50.0,
+                "ONLINE BANKING",
+                "To 1395-0292849-00",
+                "Lunch NewJob",
+                "TRANSFER",
+                "12:45-753463",
+                "u1",
+                "a.csv",
+                2,
+            ),
+            tx(
+                "B",
+                d(2026, 4, 12),
+                50.0,
+                "DIRECT CREDIT",
+                "FRM 0406-0790348-00",
+                "Lunch NewJob",
+                "TRANSFER",
+                "12:45-753463",
+                "u2",
+                "b.csv",
+                2,
+            ),
+            tx(
+                "A",
+                d(2026, 4, 13),
+                -120.0,
+                "AUTOMATIC PAYMENT",
+                "Power Co",
+                "",
+                "",
+                "abc",
+                "u3",
+                "a.csv",
+                3,
+            ),
         ];
 
         let flags = detect_internal_transfers(&txs);
@@ -69,7 +101,10 @@ mod tests {
         let start = d(2026, 4, 1);
         let end = d(2026, 5, 31);
         let definitions = default_summary_definitions();
-        let summary = summarize_for_period(&txs, start, end, &definitions).unwrap();
+        let summary = CompiledSummarySet::compile(&definitions)
+            .unwrap()
+            .summarize_for_period(&txs, start, end)
+            .unwrap();
 
         assert_eq!(summary.items[0].name, "power_payments_total");
         assert_eq!(summary.items[0].total, 120.0);
@@ -81,9 +116,45 @@ mod tests {
     fn detects_and_excludes_card_payments_from_summary_totals() {
         let d = |y, m, d| NaiveDate::from_ymd_opt(y, m, d).unwrap();
         let mut txs = vec![
-            tx("CARD", d(2025, 4, 10),  355.0, "", "PAYMENT RECEIVED THANK YOU NZL", "", "", "20250410", "u1", "card.csv", 2),
-            tx("BANK", d(2025, 4, 10), -355.0, "ONLINE BANKING", "To ************2640", "WBC Internet", "TRANSFER", "12:42-04708", "u2", "bank.csv", 2),
-            tx("BANK", d(2025, 4, 11), -120.0, "AUTOMATIC PAYMENT", "Power Co", "", "", "abc", "u3", "bank.csv", 3),
+            tx(
+                "CARD",
+                d(2025, 4, 10),
+                355.0,
+                "",
+                "PAYMENT RECEIVED THANK YOU NZL",
+                "",
+                "",
+                "20250410",
+                "u1",
+                "card.csv",
+                2,
+            ),
+            tx(
+                "BANK",
+                d(2025, 4, 10),
+                -355.0,
+                "ONLINE BANKING",
+                "To ************2640",
+                "WBC Internet",
+                "TRANSFER",
+                "12:42-04708",
+                "u2",
+                "bank.csv",
+                2,
+            ),
+            tx(
+                "BANK",
+                d(2025, 4, 11),
+                -120.0,
+                "AUTOMATIC PAYMENT",
+                "Power Co",
+                "",
+                "",
+                "abc",
+                "u3",
+                "bank.csv",
+                3,
+            ),
         ];
 
         let flags = detect_card_payments(&txs);
@@ -93,7 +164,10 @@ mod tests {
         let start = d(2025, 4, 1);
         let end = d(2025, 5, 31);
         let definitions = default_summary_definitions();
-        let summary = summarize_for_period(&txs, start, end, &definitions).unwrap();
+        let summary = CompiledSummarySet::compile(&definitions)
+            .unwrap()
+            .summarize_for_period(&txs, start, end)
+            .unwrap();
 
         assert_eq!(summary.items[0].name, "power_payments_total");
         assert_eq!(summary.items[0].total, 120.0);
@@ -105,9 +179,45 @@ mod tests {
     fn detects_loan_repayments_and_counts_only_negative_rows() {
         let d = |y, m, d| NaiveDate::from_ymd_opt(y, m, d).unwrap();
         let mut txs = vec![
-            tx("0304060790348000", d(2025, 6, 21),   -77.0, "LOAN REPAYMENT", "Loan repayment", "0406 0", "", "", "u1", "loan.csv", 2),
-            tx("0304060790348091", d(2025, 6, 21),  2800.0, "LOAN REPAYMENT", "Loan repayment", "0406 0", "", "", "u2", "loan.csv", 3),
-            tx("0304060790348000", d(2025, 6, 21), -2800.0, "LOAN REPAYMENT", "Loan repayment", "0406 0", "", "", "u3", "loan.csv", 4),
+            tx(
+                "0304060790348000",
+                d(2025, 6, 21),
+                -77.0,
+                "LOAN REPAYMENT",
+                "Loan repayment",
+                "0406 0",
+                "",
+                "",
+                "u1",
+                "loan.csv",
+                2,
+            ),
+            tx(
+                "0304060790348091",
+                d(2025, 6, 21),
+                2800.0,
+                "LOAN REPAYMENT",
+                "Loan repayment",
+                "0406 0",
+                "",
+                "",
+                "u2",
+                "loan.csv",
+                3,
+            ),
+            tx(
+                "0304060790348000",
+                d(2025, 6, 21),
+                -2800.0,
+                "LOAN REPAYMENT",
+                "Loan repayment",
+                "0406 0",
+                "",
+                "",
+                "u3",
+                "loan.csv",
+                4,
+            ),
         ];
 
         let flags = detect_loan_repayments(&txs);
@@ -116,16 +226,20 @@ mod tests {
 
         classify_transactions(&mut txs);
         let defs = default_summary_definitions();
-        let names = matched_summary_names(&txs, &defs).unwrap();
-        assert_eq!(names, vec![
-            Some("loan_repayment_total".into()),
-            None,
-            Some("loan_repayment_total".into()),
-        ]);
+        let set = CompiledSummarySet::compile(&defs).unwrap();
+        let names = set.matched_summary_names(&txs);
+        assert_eq!(
+            names,
+            vec![
+                Some("loan_repayment_total".into()),
+                None,
+                Some("loan_repayment_total".into()),
+            ]
+        );
 
         let start = d(2025, 4, 1);
         let end = d(2025, 6, 30);
-        let summary = summarize_for_period(&txs, start, end, &defs).unwrap();
+        let summary = set.summarize_for_period(&txs, start, end).unwrap();
 
         assert_eq!(summary.items[2].name, "loan_repayment_total");
         assert_eq!(summary.items[2].total, 2877.0);
@@ -139,8 +253,32 @@ mod tests {
     fn detects_payment_received_card_charge_without_reference_match() {
         let d = |y, m, d| NaiveDate::from_ymd_opt(y, m, d).unwrap();
         let mut txs = vec![
-            tx("0000000003071972735", d(2025, 9, 10),  1200.0, "", "PAYMENT RECEIVED       THANK YOU     NZL", "", "", "20250910", "u1", "card.csv", 46),
-            tx("0304060790348000",   d(2025, 9, 10), -1200.0, "ONLINE BANKING", "To ************2640", "Fly Melbourn", "", "21:23-90724", "u2", "bank.csv", 96),
+            tx(
+                "0000000003071972735",
+                d(2025, 9, 10),
+                1200.0,
+                "",
+                "PAYMENT RECEIVED       THANK YOU     NZL",
+                "",
+                "",
+                "20250910",
+                "u1",
+                "card.csv",
+                46,
+            ),
+            tx(
+                "0304060790348000",
+                d(2025, 9, 10),
+                -1200.0,
+                "ONLINE BANKING",
+                "To ************2640",
+                "Fly Melbourn",
+                "",
+                "21:23-90724",
+                "u2",
+                "bank.csv",
+                96,
+            ),
         ];
 
         let flags = detect_card_payments(&txs);
@@ -148,7 +286,9 @@ mod tests {
 
         classify_transactions(&mut txs);
         let defs = default_summary_definitions();
-        let names = matched_summary_names(&txs, &defs).unwrap();
+        let names = CompiledSummarySet::compile(&defs)
+            .unwrap()
+            .matched_summary_names(&txs);
         assert_eq!(names, vec![None, None]);
     }
 }
