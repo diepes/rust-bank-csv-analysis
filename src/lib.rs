@@ -108,12 +108,6 @@ pub fn read_transactions(paths: &[impl AsRef<Path>]) -> Result<Vec<Transaction>>
     read_transactions_from_paths(paths)
 }
 
-pub fn read_transactions_with_summary_definitions(
-    paths: &[impl AsRef<Path>],
-    _summary_definitions: Option<&[SummaryDefinition]>,
-) -> Result<Vec<Transaction>> {
-    read_transactions_from_paths(paths)
-}
 
 fn read_transactions_from_paths(paths: &[impl AsRef<Path>]) -> Result<Vec<Transaction>> {
     let mut all = Vec::new();
