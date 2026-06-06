@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::Parser;
 use rust_bank_csv_analysis::{
-    latest_full_tax_year_start, nz_period_for_year, read_transactions,
+    latest_full_tax_year_start, nz_period_for_year, read_transactions_with_summary_definitions,
     resolve_summary_definitions, summarize_for_period, write_xlsx,
 };
 
@@ -26,13 +26,16 @@ struct Cli {
 
 fn run() -> Result<()> {
     let cli = Cli::parse();
-    let transactions = read_transactions(&cli.csv_files)?;
+    let summary_definitions = resolve_summary_definitions(cli.summary_config.as_ref())?;
+    let transactions = read_transactions_with_summary_definitions(
+        &cli.csv_files,
+        Some(&summary_definitions),
+    )?;
 
     let start_year = cli
         .tax_year_start
         .unwrap_or_else(latest_full_tax_year_start);
     let (period_start, period_end) = nz_period_for_year(start_year)?;
-    let summary_definitions = resolve_summary_definitions(cli.summary_config.as_ref())?;
     let summary = summarize_for_period(
         &transactions,
         period_start,
@@ -44,6 +47,7 @@ fn run() -> Result<()> {
         &transactions,
         period_start,
         period_end,
+        &summary_definitions,
         &summary,
     )?;
 
@@ -66,7 +70,7 @@ fn run() -> Result<()> {
 
 fn main() {
     if let Err(err) = run() {
-        eprintln!("error: {err:#}");
+        eprintln!("\x1b[31merror:\x1b[0m {err:#}");
         std::process::exit(1);
     }
 }

@@ -8,6 +8,7 @@ use regex::{Regex, RegexBuilder};
 use serde::Deserialize;
 
 use crate::Transaction;
+use crate::check_summay;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct SummaryDefinition {
@@ -15,6 +16,10 @@ pub struct SummaryDefinition {
     #[serde(default)]
     pub description: String,
     pub regex: String,
+    #[serde(default, alias = "colour")]
+    pub color: Option<String>,
+    #[serde(default = "default_lock_sign_on_first_match")]
+    pub lock_sign_on_first_match: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -45,12 +50,26 @@ struct SummaryDefinitionBody {
     #[serde(default)]
     description: String,
     regex: String,
+    #[serde(default, alias = "colour")]
+    color: Option<String>,
 }
 
 struct CompiledSummaryDefinition {
     name: String,
     description: String,
     regex: Regex,
+    lock_sign_on_first_match: bool,
+}
+
+#[derive(Debug, Clone)]
+struct SignLockState {
+    expected_positive: bool,
+    first_file: String,
+    first_line: usize,
+}
+
+fn default_lock_sign_on_first_match() -> bool {
+    true
 }
 
 pub fn default_summary_definitions() -> Vec<SummaryDefinition> {
@@ -59,11 +78,15 @@ pub fn default_summary_definitions() -> Vec<SummaryDefinition> {
             name: "power_payments_total".to_string(),
             description: "Total power payments".to_string(),
             regex: "power".to_string(),
+            color: None,
+            lock_sign_on_first_match: true,
         },
         SummaryDefinition {
             name: "mortgage_interest_total".to_string(),
             description: "Total mortgage interest".to_string(),
             regex: "mortgage.*interest|interest.*mortgage".to_string(),
+            color: None,
+            lock_sign_on_first_match: true,
         },
     ]
 }
@@ -85,6 +108,8 @@ pub fn load_summary_definitions(path: impl AsRef<Path>) -> Result<Vec<SummaryDef
                 name,
                 description: body.description,
                 regex: body.regex,
+                color: body.color,
+                lock_sign_on_first_match: default_lock_sign_on_first_match(),
             })
             .collect(),
     };
@@ -110,6 +135,7 @@ pub fn summarize_for_period(
             total: 0.0,
         })
         .collect();
+    let mut sign_locks: Vec<Option<SignLockState>> = vec![None; compiled.len()];
     let mut no_match_total = 0.0;
     let mut total = 0.0;
 
@@ -117,11 +143,11 @@ pub fn summarize_for_period(
         .iter()
         .filter(|tx| tx.date >= period_start && tx.date <= period_end)
     {
-        if tx.amount >= 0.0 {
+        if tx.amount == 0.0 {
             continue;
         }
 
-        let amount = -tx.amount;
+        let amount = tx.amount.abs();
         total += amount;
         let text = searchable_text(tx);
         if let Some((idx, _)) = compiled
@@ -129,6 +155,35 @@ pub fn summarize_for_period(
             .enumerate()
             .find(|(_, def)| def.regex.is_match(&text))
         {
+            if compiled[idx].lock_sign_on_first_match {
+                let is_positive = tx.amount > 0.0;
+                match &sign_locks[idx] {
+                    None => {
+                        sign_locks[idx] = Some(SignLockState {
+                            expected_positive: is_positive,
+                            first_file: tx.source_file.clone(),
+                            first_line: tx.source_line,
+                        });
+                    }
+                    Some(state) if state.expected_positive != is_positive => {
+                        return Err(anyhow!(
+                            "sign mismatch for summary '{}': first match was {} at '{}' line {}, but found {} at '{}' line {}",
+                            compiled[idx].name,
+                            if state.expected_positive {
+                                "positive"
+                            } else {
+                                "negative"
+                            },
+                            state.first_file,
+                            state.first_line,
+                            if is_positive { "positive" } else { "negative" },
+                            tx.source_file,
+                            tx.source_line
+                        ));
+                    }
+                    _ => {}
+                }
+            }
             totals[idx].total += amount;
         } else {
             no_match_total += amount;
@@ -158,7 +213,71 @@ pub fn summarize_for_period(
     Ok(Summary { items: totals })
 }
 
+pub fn matched_transactions_for_period(
+    transactions: &[Transaction],
+    period_start: NaiveDate,
+    period_end: NaiveDate,
+    definitions: &[SummaryDefinition],
+) -> Result<Vec<bool>> {
+    let all_matches = matched_transactions(transactions, definitions)?;
+
+    let mut matched = vec![false; transactions.len()];
+    for (idx, tx) in transactions.iter().enumerate() {
+        if tx.date < period_start || tx.date > period_end || tx.amount == 0.0 {
+            continue;
+        }
+        matched[idx] = all_matches[idx];
+    }
+
+    Ok(matched)
+}
+
+pub fn matched_transactions(
+    transactions: &[Transaction],
+    definitions: &[SummaryDefinition],
+) -> Result<Vec<bool>> {
+    validate_summary_definitions(definitions)?;
+    let compiled = compile_summary_definitions(definitions)?;
+
+    let mut matched = vec![false; transactions.len()];
+    for (idx, tx) in transactions.iter().enumerate() {
+        if tx.amount == 0.0 {
+            continue;
+        }
+
+        let text = searchable_text(tx);
+        matched[idx] = compiled.iter().any(|def| def.regex.is_match(&text));
+    }
+
+    Ok(matched)
+}
+
+pub fn matched_summary_names(
+    transactions: &[Transaction],
+    definitions: &[SummaryDefinition],
+) -> Result<Vec<Option<String>>> {
+    validate_summary_definitions(definitions)?;
+    let compiled = compile_summary_definitions(definitions)?;
+
+    let mut names = vec![None; transactions.len()];
+    for (idx, tx) in transactions.iter().enumerate() {
+        if tx.amount == 0.0 {
+            continue;
+        }
+
+        let text = searchable_text(tx);
+        names[idx] = compiled
+            .iter()
+            .find(|def| def.regex.is_match(&text))
+            .map(|def| def.name.clone());
+    }
+
+    Ok(names)
+}
+
 fn validate_summary_definitions(definitions: &[SummaryDefinition]) -> Result<()> {
+    check_summay::check_summary_definitions(definitions)?;
+
     if definitions.is_empty() {
         return Err(anyhow!("summary definitions cannot be empty"));
     }
@@ -199,6 +318,7 @@ fn compile_summary_definitions(
                 name: def.name.clone(),
                 description: def.description.clone(),
                 regex,
+                lock_sign_on_first_match: def.lock_sign_on_first_match,
             })
         })
         .collect()
@@ -239,6 +359,8 @@ mod tests {
                 serial_number: String::new(),
                 account_code: String::new(),
                 unique_id: "202504020001".into(),
+                source_file: "test.csv".into(),
+                source_line: 2,
             },
             Transaction {
                 account_number: "1".into(),
@@ -254,6 +376,8 @@ mod tests {
                 serial_number: String::new(),
                 account_code: String::new(),
                 unique_id: "202505150001".into(),
+                source_file: "test.csv".into(),
+                source_line: 3,
             },
             Transaction {
                 account_number: "1".into(),
@@ -269,6 +393,8 @@ mod tests {
                 serial_number: String::new(),
                 account_code: String::new(),
                 unique_id: "202506010001".into(),
+                source_file: "test.csv".into(),
+                source_line: 4,
             },
         ];
 
@@ -303,6 +429,8 @@ mod tests {
             serial_number: String::new(),
             account_code: String::new(),
             unique_id: "202504100001".into(),
+            source_file: "test.csv".into(),
+            source_line: 2,
         }];
 
         let start = NaiveDate::from_ymd_opt(2025, 4, 1).unwrap();
@@ -332,6 +460,8 @@ mod tests {
                     name,
                     description: body.description,
                     regex: body.regex,
+                    color: body.color,
+                    lock_sign_on_first_match: default_lock_sign_on_first_match(),
                 })
                 .collect(),
         };
@@ -356,6 +486,8 @@ mod tests {
                     name,
                     description: body.description,
                     regex: body.regex,
+                    color: body.color,
+                    lock_sign_on_first_match: default_lock_sign_on_first_match(),
                 })
                 .collect(),
         };
@@ -363,5 +495,217 @@ mod tests {
         assert_eq!(defs.len(), 2);
         assert_eq!(defs[0].name, "mortgage_interest_total");
         assert_eq!(defs[1].name, "power_payments_total");
+    }
+
+    #[test]
+    fn marks_only_matching_transactions_for_period() {
+        let txs = vec![
+            Transaction {
+                account_number: "1".into(),
+                date: NaiveDate::from_ymd_opt(2025, 4, 2).unwrap(),
+                amount: -120.0,
+                transaction_code: String::new(),
+                transaction_type: "AUTOMATIC PAYMENT".into(),
+                source: String::new(),
+                other_party: "Power Co".into(),
+                particulars: String::new(),
+                analysis_code: String::new(),
+                reference: String::new(),
+                serial_number: String::new(),
+                account_code: String::new(),
+                unique_id: "202504020001".into(),
+                source_file: "test.csv".into(),
+                source_line: 2,
+            },
+            Transaction {
+                account_number: "1".into(),
+                date: NaiveDate::from_ymd_opt(2025, 4, 3).unwrap(),
+                amount: -60.0,
+                transaction_code: String::new(),
+                transaction_type: "AUTOMATIC PAYMENT".into(),
+                source: String::new(),
+                other_party: "Unknown".into(),
+                particulars: String::new(),
+                analysis_code: String::new(),
+                reference: String::new(),
+                serial_number: String::new(),
+                account_code: String::new(),
+                unique_id: "202504030001".into(),
+                source_file: "test.csv".into(),
+                source_line: 3,
+            },
+            Transaction {
+                account_number: "1".into(),
+                date: NaiveDate::from_ymd_opt(2025, 6, 1).unwrap(),
+                amount: -20.0,
+                transaction_code: String::new(),
+                transaction_type: "AUTOMATIC PAYMENT".into(),
+                source: String::new(),
+                other_party: "Power Co".into(),
+                particulars: String::new(),
+                analysis_code: String::new(),
+                reference: String::new(),
+                serial_number: String::new(),
+                account_code: String::new(),
+                unique_id: "202506010001".into(),
+                source_file: "test.csv".into(),
+                source_line: 4,
+            },
+        ];
+
+        let start = NaiveDate::from_ymd_opt(2025, 4, 1).unwrap();
+        let end = NaiveDate::from_ymd_opt(2025, 5, 31).unwrap();
+        let definitions = default_summary_definitions();
+        let matched = matched_transactions_for_period(&txs, start, end, &definitions).unwrap();
+
+        assert_eq!(matched, vec![true, false, false]);
+    }
+
+    #[test]
+    fn matches_transactions_outside_period_when_requested() {
+        let txs = vec![
+            Transaction {
+                account_number: "1".into(),
+                date: NaiveDate::from_ymd_opt(2025, 4, 2).unwrap(),
+                amount: -120.0,
+                transaction_code: String::new(),
+                transaction_type: "AUTOMATIC PAYMENT".into(),
+                source: String::new(),
+                other_party: "Power Co".into(),
+                particulars: String::new(),
+                analysis_code: String::new(),
+                reference: String::new(),
+                serial_number: String::new(),
+                account_code: String::new(),
+                unique_id: "202504020001".into(),
+                source_file: "test.csv".into(),
+                source_line: 2,
+            },
+            Transaction {
+                account_number: "1".into(),
+                date: NaiveDate::from_ymd_opt(2025, 6, 1).unwrap(),
+                amount: -20.0,
+                transaction_code: String::new(),
+                transaction_type: "AUTOMATIC PAYMENT".into(),
+                source: String::new(),
+                other_party: "Power Co".into(),
+                particulars: String::new(),
+                analysis_code: String::new(),
+                reference: String::new(),
+                serial_number: String::new(),
+                account_code: String::new(),
+                unique_id: "202506010001".into(),
+                source_file: "test.csv".into(),
+                source_line: 3,
+            },
+        ];
+
+        let definitions = default_summary_definitions();
+        let matched = matched_transactions(&txs, &definitions).unwrap();
+
+        assert_eq!(matched, vec![true, true]);
+    }
+
+    #[test]
+    fn returns_matched_summary_names_in_order() {
+        let txs = vec![
+            Transaction {
+                account_number: "1".into(),
+                date: NaiveDate::from_ymd_opt(2025, 4, 2).unwrap(),
+                amount: -120.0,
+                transaction_code: String::new(),
+                transaction_type: "AUTOMATIC PAYMENT".into(),
+                source: String::new(),
+                other_party: "Power Co".into(),
+                particulars: String::new(),
+                analysis_code: String::new(),
+                reference: String::new(),
+                serial_number: String::new(),
+                account_code: String::new(),
+                unique_id: "202504020001".into(),
+                source_file: "test.csv".into(),
+                source_line: 2,
+            },
+            Transaction {
+                account_number: "1".into(),
+                date: NaiveDate::from_ymd_opt(2025, 4, 3).unwrap(),
+                amount: -60.0,
+                transaction_code: String::new(),
+                transaction_type: "AUTOMATIC PAYMENT".into(),
+                source: String::new(),
+                other_party: "Unknown".into(),
+                particulars: String::new(),
+                analysis_code: String::new(),
+                reference: String::new(),
+                serial_number: String::new(),
+                account_code: String::new(),
+                unique_id: "202504030001".into(),
+                source_file: "test.csv".into(),
+                source_line: 3,
+            },
+        ];
+
+        let definitions = default_summary_definitions();
+        let names = matched_summary_names(&txs, &definitions).unwrap();
+
+        assert_eq!(names[0], Some("power_payments_total".to_string()));
+        assert_eq!(names[1], None);
+    }
+
+    #[test]
+    fn errors_when_summary_matches_mixed_signs() {
+        let txs = vec![
+            Transaction {
+                account_number: "1".into(),
+                date: NaiveDate::from_ymd_opt(2025, 4, 2).unwrap(),
+                amount: -120.0,
+                transaction_code: String::new(),
+                transaction_type: "PAYMENT".into(),
+                source: String::new(),
+                other_party: "Power Co".into(),
+                particulars: String::new(),
+                analysis_code: String::new(),
+                reference: String::new(),
+                serial_number: String::new(),
+                account_code: String::new(),
+                unique_id: "202504020001".into(),
+                source_file: "file_a.csv".into(),
+                source_line: 8,
+            },
+            Transaction {
+                account_number: "1".into(),
+                date: NaiveDate::from_ymd_opt(2025, 4, 3).unwrap(),
+                amount: 90.0,
+                transaction_code: String::new(),
+                transaction_type: "PAYMENT".into(),
+                source: String::new(),
+                other_party: "Power Co".into(),
+                particulars: String::new(),
+                analysis_code: String::new(),
+                reference: String::new(),
+                serial_number: String::new(),
+                account_code: String::new(),
+                unique_id: "202504030001".into(),
+                source_file: "file_b.csv".into(),
+                source_line: 14,
+            },
+        ];
+
+        let start = NaiveDate::from_ymd_opt(2025, 4, 1).unwrap();
+        let end = NaiveDate::from_ymd_opt(2025, 5, 31).unwrap();
+        let definitions = vec![SummaryDefinition {
+            name: "power_payments_total".into(),
+            description: String::new(),
+            regex: "power".into(),
+            color: None,
+            lock_sign_on_first_match: true,
+        }];
+        let err = summarize_for_period(&txs, start, end, &definitions)
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("sign mismatch for summary 'power_payments_total'"));
+        assert!(err.contains("'file_a.csv' line 8"));
+        assert!(err.contains("'file_b.csv' line 14"));
     }
 }

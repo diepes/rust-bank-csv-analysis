@@ -1,15 +1,18 @@
 use std::path::Path;
+use std::collections::HashMap;
 
 use anyhow::{Context, Result, anyhow};
 use chrono::{Datelike, Local, NaiveDate};
 use csv::ReaderBuilder;
-use rust_xlsxwriter::Workbook;
+use rust_xlsxwriter::{Color, Format, Workbook};
 use serde::Deserialize;
 
 pub mod calc_summary;
+pub mod check_summay;
 
 pub use calc_summary::{
     Summary, SummaryDefinition, default_summary_definitions, load_summary_definitions,
+    matched_summary_names, matched_transactions, matched_transactions_for_period,
     summarize_for_period,
 };
 
@@ -30,6 +33,8 @@ pub struct Transaction {
     pub serial_number: String,
     pub account_code: String,
     pub unique_id: String,
+    pub source_file: String,
+    pub source_line: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -88,11 +93,20 @@ impl TryFrom<RawTransaction> for Transaction {
             serial_number: value.serial_number,
             account_code: value.account_code,
             unique_id: value.unique_id,
+            source_file: String::new(),
+            source_line: 0,
         })
     }
 }
 
 pub fn read_transactions(paths: &[impl AsRef<Path>]) -> Result<Vec<Transaction>> {
+    read_transactions_with_summary_definitions(paths, None)
+}
+
+pub fn read_transactions_with_summary_definitions(
+    paths: &[impl AsRef<Path>],
+    _summary_definitions: Option<&[SummaryDefinition]>,
+) -> Result<Vec<Transaction>> {
     let mut all = Vec::new();
 
     for path in paths {
@@ -102,11 +116,33 @@ pub fn read_transactions(paths: &[impl AsRef<Path>]) -> Result<Vec<Transaction>>
             .from_path(path_ref)
             .with_context(|| format!("failed reading CSV '{}'", path_ref.display()))?;
 
-        for row in reader.deserialize::<RawTransaction>() {
-            let raw = row.with_context(|| {
-                format!("failed parsing row in CSV '{}'", path_ref.to_string_lossy())
+        for (row_idx, row) in reader.records().enumerate() {
+            let line_number = row_idx + 2;
+            let record = row.with_context(|| {
+                format!(
+                    "failed parsing row at line {} in CSV '{}'",
+                    line_number,
+                    path_ref.to_string_lossy()
+                )
             })?;
-            all.push(Transaction::try_from(raw)?);
+            let raw: RawTransaction = record.deserialize(None).with_context(|| {
+                format!(
+                    "failed parsing row at line {} in CSV '{}'",
+                    line_number,
+                    path_ref.to_string_lossy()
+                )
+            })?;
+            let mut tx = Transaction::try_from(raw).with_context(|| {
+                format!(
+                    "failed parsing row at line {} in CSV '{}'",
+                    line_number,
+                    path_ref.to_string_lossy()
+                )
+            })?;
+            tx.source_file = path_ref.display().to_string();
+            tx.source_line = line_number;
+
+            all.push(tx);
         }
     }
 
@@ -161,11 +197,35 @@ pub fn write_xlsx(
     transactions: &[Transaction],
     period_start: NaiveDate,
     period_end: NaiveDate,
+    summary_definitions: &[SummaryDefinition],
     summary: &Summary,
 ) -> Result<()> {
     let mut workbook = Workbook::new();
     let worksheet = workbook.add_worksheet();
     worksheet.set_name("Transactions")?;
+    let matched_summary_names = matched_summary_names(transactions, summary_definitions)?;
+    let matched_rows: Vec<bool> = matched_summary_names
+        .iter()
+        .map(|name| name.is_some())
+        .collect();
+    let matched_rows_in_period = matched_transactions_for_period(
+        transactions,
+        period_start,
+        period_end,
+        summary_definitions,
+    )?;
+    let summary_colors: HashMap<&str, u32> = summary_definitions
+        .iter()
+        .filter_map(|def| {
+            def.color
+                .as_deref()
+                .and_then(|value| check_summay::parse_summary_color(value).ok())
+                .map(|rgb| (def.name.as_str(), rgb))
+        })
+        .collect();
+    let matched_in_period_format = Format::new().set_background_color(Color::RGB(0xE2F0D9));
+    let matched_outside_period_format =
+        Format::new().set_background_color(Color::RGB(0xC6EFD6));
 
     let headers = [
         "Account Number",
@@ -181,6 +241,7 @@ pub fn write_xlsx(
         "Serial Number",
         "Account Code",
         "Unique ID",
+        "Summary",
     ];
 
     for (col, header) in headers.iter().enumerate() {
@@ -189,6 +250,22 @@ pub fn write_xlsx(
 
     for (idx, tx) in transactions.iter().enumerate() {
         let row = (idx + 1) as u32;
+        if matched_rows[idx] {
+            if let Some(summary_name) = matched_summary_names[idx].as_deref() {
+                if let Some(rgb) = summary_colors.get(summary_name) {
+                    let summary_color_format = Format::new().set_background_color(Color::RGB(*rgb));
+                    worksheet.set_row_format(row, &summary_color_format)?;
+                } else if matched_rows_in_period[idx] {
+                    worksheet.set_row_format(row, &matched_in_period_format)?;
+                } else {
+                    worksheet.set_row_format(row, &matched_outside_period_format)?;
+                }
+            } else if matched_rows_in_period[idx] {
+                worksheet.set_row_format(row, &matched_in_period_format)?;
+            } else {
+                worksheet.set_row_format(row, &matched_outside_period_format)?;
+            }
+        }
         worksheet.write_string(row, 0, &tx.account_number)?;
         worksheet.write_string(row, 1, tx.date.format(DATE_FMT).to_string())?;
         worksheet.write_number(row, 2, tx.amount)?;
@@ -202,6 +279,9 @@ pub fn write_xlsx(
         worksheet.write_string(row, 10, &tx.serial_number)?;
         worksheet.write_string(row, 11, &tx.account_code)?;
         worksheet.write_string(row, 12, &tx.unique_id)?;
+        if let Some(summary_name) = &matched_summary_names[idx] {
+            worksheet.write_string(row, 13, summary_name)?;
+        }
     }
 
     let summary_ws = workbook.add_worksheet();
@@ -230,6 +310,8 @@ pub fn write_xlsx(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn latest_full_tax_year_start_after_april_first() {
@@ -247,5 +329,47 @@ mod tests {
     fn latest_full_tax_year_start_on_april_first() {
         let date = NaiveDate::from_ymd_opt(2026, 4, 1).unwrap();
         assert_eq!(latest_full_tax_year_start_for_date(date), 2025);
+    }
+
+    #[test]
+    fn read_transactions_allows_mixed_signs_per_file() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("mixed-signs-{unique}.csv"));
+        let csv = "Account Number,Date,Amount,Transaction Code,Transaction Type,Source,Other Party,Particulars,Analysis (Code),Reference,Serial Number,Account Code,Unique ID\n1,20250401,-10.00,,,SRC,Vendor A,,,,,,u1\n1,20250402,20.00,,,SRC,Vendor B,,,,,,u2\n";
+
+        fs::write(&path, csv).unwrap();
+        let txs = read_transactions(&[path.as_path()]).unwrap();
+        fs::remove_file(&path).unwrap();
+
+        assert_eq!(txs.len(), 2);
+    }
+
+    #[test]
+    fn read_transactions_includes_all_rows_from_all_files() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path_a = std::env::temp_dir().join(format!("all-files-a-{unique}.csv"));
+        let path_b = std::env::temp_dir().join(format!("all-files-b-{unique}.csv"));
+
+        let csv_a = "Account Number,Date,Amount,Transaction Code,Transaction Type,Source,Other Party,Particulars,Analysis (Code),Reference,Serial Number,Account Code,Unique ID\n1,20250401,-10.00,,,SRC,Vendor A,,,,,,a1\n1,20250402,20.00,,,SRC,Vendor B,,,,,,a2\n";
+        let csv_b = "Account Number,Date,Amount,Transaction Code,Transaction Type,Source,Other Party,Particulars,Analysis (Code),Reference,Serial Number,Account Code,Unique ID\n2,20250403,-30.00,,,SRC,Vendor C,,,,,,b1\n2,20250404,40.00,,,SRC,Vendor D,,,,,,b2\n";
+
+        fs::write(&path_a, csv_a).unwrap();
+        fs::write(&path_b, csv_b).unwrap();
+        let txs = read_transactions(&[path_a.as_path(), path_b.as_path()]).unwrap();
+        fs::remove_file(&path_a).unwrap();
+        fs::remove_file(&path_b).unwrap();
+
+        assert_eq!(txs.len(), 4);
+        assert!(txs.iter().any(|tx| tx.unique_id == "a1"));
+        assert!(txs.iter().any(|tx| tx.unique_id == "a2"));
+        assert!(txs.iter().any(|tx| tx.unique_id == "b1"));
+        assert!(txs.iter().any(|tx| tx.unique_id == "b2"));
+        assert!(txs.iter().all(|tx| tx.source_line == 2 || tx.source_line == 3));
     }
 }
