@@ -74,6 +74,25 @@ guards). A bug in the pairing logic would need fixing in two places.
 
 ---
 
+### ✅ #4 — Extract XLSX writing into `src/xlsx.rs`
+
+**Problem:** `lib.rs` contained a 170-line `write_xlsx` function alongside CSV reading, the
+`Transaction` struct, and public re-exports — mixing I/O concerns.  Formatting constants,
+colour logic, and sheet layout were buried in the general-purpose library entry point.
+
+**What was done:**
+- Created `src/xlsx.rs` with three functions:
+  - `pub write_xlsx(...)` — top-level entry point, delegates to the two sheet writers
+  - `write_transactions_sheet(...)` (private) — builds the Transactions sheet
+    (headers, column widths, row colours by `TransactionClass` and summary match, autofilter)
+  - `write_summary_sheet(...)` (private) — builds the Summary sheet (period dates + items table)
+- `lib.rs` now declares `pub mod xlsx` and re-exports `xlsx::write_xlsx`; the old 170-line
+  implementation and its imports (`HashMap`, `rust_xlsxwriter::{Color, Format, Workbook}`)
+  were removed from `lib.rs`.
+- All 23 tests pass; no public API changes.
+
+---
+
 ## Remaining Candidates
 
 *(none at this time)*
