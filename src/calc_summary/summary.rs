@@ -356,7 +356,6 @@ mod tests {
     use super::*;
     use crate::Transaction;
     use crate::calc_summary::config::default_summary_definitions;
-    use crate::calc_summary::types::TransactionClass;
     use chrono::NaiveDate;
 
     fn def(name: &str, regex: &str) -> SummaryDefinition {
@@ -382,19 +381,13 @@ mod tests {
             account_number: account.into(),
             date,
             amount,
-            transaction_code: String::new(),
             transaction_type: transaction_type.into(),
-            source: String::new(),
             other_party: other_party.into(),
             particulars: particulars.into(),
-            analysis_code: String::new(),
-            reference: String::new(),
-            serial_number: String::new(),
-            account_code: String::new(),
             unique_id: unique_id.into(),
             source_file: "test.csv".into(),
             source_line: 2,
-            class: TransactionClass::Countable,
+            ..Default::default()
         }
     }
 

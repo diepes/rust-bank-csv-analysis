@@ -33,19 +33,15 @@ mod tests {
             account_number: account.into(),
             date,
             amount,
-            transaction_code: String::new(),
             transaction_type: transaction_type.into(),
-            source: String::new(),
             other_party: other_party.into(),
             particulars: particulars.into(),
             analysis_code: analysis_code.into(),
             reference: reference.into(),
-            serial_number: String::new(),
-            account_code: String::new(),
             unique_id: unique_id.into(),
             source_file: source_file.into(),
             source_line,
-            class: TransactionClass::Countable,
+            ..Default::default()
         }
     }
 

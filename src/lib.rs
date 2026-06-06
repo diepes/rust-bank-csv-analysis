@@ -38,6 +38,29 @@ pub struct Transaction {
     pub class: TransactionClass,
 }
 
+impl Default for Transaction {
+    fn default() -> Self {
+        Self {
+            account_number: String::new(),
+            date: NaiveDate::from_ymd_opt(1970, 1, 1).expect("valid epoch date"),
+            amount: 0.0,
+            transaction_code: String::new(),
+            transaction_type: String::new(),
+            source: String::new(),
+            other_party: String::new(),
+            particulars: String::new(),
+            analysis_code: String::new(),
+            reference: String::new(),
+            serial_number: String::new(),
+            account_code: String::new(),
+            unique_id: String::new(),
+            source_file: String::new(),
+            source_line: 0,
+            class: TransactionClass::Countable,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct RawTransaction {
     #[serde(rename = "Account Number")]
@@ -102,10 +125,6 @@ impl TryFrom<RawTransaction> for Transaction {
 }
 
 pub fn read_transactions(paths: &[impl AsRef<Path>]) -> Result<Vec<Transaction>> {
-    read_transactions_from_paths(paths)
-}
-
-fn read_transactions_from_paths(paths: &[impl AsRef<Path>]) -> Result<Vec<Transaction>> {
     let mut all = Vec::new();
 
     for path in paths {
