@@ -175,10 +175,10 @@ mod tests {
     #[test]
     fn detects_loan_repayments_and_counts_only_negative_rows() {
         let d = |y, m, d| NaiveDate::from_ymd_opt(y, m, d).unwrap();
-        // Real-world scenario: main account sends -2800, loan account receives +2800.
-        // Both legs are present in the loaded CSVs and form a detected pair.
-        // A separate unpaired loan-repayment-labelled row (-77) has no counterpart
-        // on a different account, so it stays Countable and falls into no_match.
+        // Real-world scenario: main account has two debits on the same day —
+        // -2800 (principal transfer) and -77 (loan fee) — plus the +2800 credit
+        // at the loan account. All share "LOAN REPAYMENT" text so they form one
+        // group. The two negatives are counted; the positive is only.
         let mut txs = vec![
             tx(
                 "0304060790348000",
@@ -186,8 +186,8 @@ mod tests {
                 -77.0,
                 "LOAN REPAYMENT",
                 "Loan repayment",
-                "0406 0 790348-91",
-                "",
+                "0406 0",
+                "790348-92",
                 "",
                 "u1",
                 "main.csv",
@@ -199,8 +199,8 @@ mod tests {
                 2800.0,
                 "LOAN REPAYMENT",
                 "Loan repayment",
-                "0406 0 790348-00",
-                "",
+                "0406 0",
+                "790348-00",
                 "",
                 "u2",
                 "loan.csv",
@@ -212,8 +212,8 @@ mod tests {
                 -2800.0,
                 "LOAN REPAYMENT",
                 "Loan repayment",
-                "0406 0 790348-91",
-                "",
+                "0406 0",
+                "790348-91",
                 "",
                 "u3",
                 "main.csv",
@@ -222,13 +222,14 @@ mod tests {
         ];
 
         let flags = detect_loan_repayments(&txs);
-        // tx[0] (-77) has no matching +77 on a different account — not paired
-        // tx[1] (+2800) and tx[2] (-2800) form the loan repayment pair
-        assert_eq!(flags.related, vec![false, true, true]);
-        assert_eq!(flags.counted, vec![false, false, true]);
+        // Debits with other_party="Loan repayment" → counted immediately.
+        // The +2800 credit matches -2800 debit via analysis_code cross-reference
+        // ("79034800" ⊆ "0304060790348000") → related-only (skip_loan_transfer).
+        assert_eq!(flags.related, vec![true, true, true]);
+        assert_eq!(flags.counted, vec![true, false, true]);
 
         classify_transactions(&mut txs);
-        assert_eq!(txs[0].class, crate::TransactionClass::Countable);
+        assert_eq!(txs[0].class, crate::TransactionClass::LoanRepaymentCounted);
         assert_eq!(txs[1].class, crate::TransactionClass::LoanRepaymentOnly);
         assert_eq!(txs[2].class, crate::TransactionClass::LoanRepaymentCounted);
 
@@ -241,9 +242,9 @@ mod tests {
         let summary = set.summarize_for_period(&txs, start, end).unwrap();
 
         assert_eq!(summary.items[2].name, "loan_repayment_total");
-        assert_eq!(summary.items[2].total, 2800.0); // only the paired negative leg
+        assert_eq!(summary.items[2].total, 2877.0); // 2800 + 77 fee
         assert_eq!(summary.items[3].name, "no_match");
-        assert_eq!(summary.items[3].total, 77.0); // unpaired -77 falls here
+        assert_eq!(summary.items[3].total, 0.0);
         assert_eq!(summary.items[4].name, "total");
         assert_eq!(summary.items[4].total, 2877.0);
     }

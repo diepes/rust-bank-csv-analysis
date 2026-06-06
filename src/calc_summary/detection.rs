@@ -30,21 +30,72 @@ pub fn classify_transactions(transactions: &mut [Transaction]) {
     }
 }
 
+/// Detects loan repayment transactions using a two-pass approach:
+///
+/// Pass 1 — debits: any transaction where `other_party` contains "loan repayment"
+///   (case-insensitive) and `amount < 0` is immediately marked as counted
+///   (→ `loan_repayment_total`).
+///
+/// Pass 2 — credits: a positive-amount transaction where `other_party` ~
+///   "loan repayment" is marked as related-only (→ `skip_loan_transfer`) only
+///   when it can be paired with a same-date, same-absolute-amount debit using
+///   the `analysis_code` cross-reference.  Banks encode the counterpart account
+///   number in `analysis_code` with a dash separator (e.g. `"790348-91"`).
+///   Stripping the dash gives a substring that appears inside the counterpart's
+///   full account number (e.g. `"79034891"` ⊆ `"0304060790348091"`).  We check
+///   both directions (credit→debit and debit→credit) to handle either leg.
 pub fn detect_loan_repayments(transactions: &[Transaction]) -> LoanRepaymentFlags {
     let mut related = vec![false; transactions.len()];
     let mut counted = vec![false; transactions.len()];
 
-    for (a_idx, b_idx) in candidate_pairs(transactions) {
-        let a = &transactions[a_idx];
-        let b = &transactions[b_idx];
+    // Pass 1: mark all debits with other_party ~ "loan repayment".
+    for (idx, tx) in transactions.iter().enumerate() {
+        if tx.amount < 0.0 && is_loan_repayment_other_party(tx) {
+            related[idx] = true;
+            counted[idx] = true;
+        }
+    }
 
-        if looks_like_loan_repayment_candidate(a) && looks_like_loan_repayment_candidate(b) {
-            related[a_idx] = true;
-            related[b_idx] = true;
-            if a.amount < 0.0 {
-                counted[a_idx] = true;
-            } else {
-                counted[b_idx] = true;
+    // Pass 2: match credits to debits via analysis_code ↔ account_number.
+    // Group candidates by (date, |amount_cents|) for O(n) pairing.
+    let mut by_date_amount: HashMap<(NaiveDate, i64), Vec<usize>> = HashMap::new();
+    for (idx, tx) in transactions.iter().enumerate() {
+        if tx.amount != 0.0 && is_loan_repayment_other_party(tx) {
+            let cents = (tx.amount.abs() * 100.0).round() as i64;
+            by_date_amount
+                .entry((tx.date, cents))
+                .or_default()
+                .push(idx);
+        }
+    }
+
+    for indices in by_date_amount.values() {
+        let credits: Vec<usize> = indices
+            .iter()
+            .copied()
+            .filter(|&i| transactions[i].amount > 0.0)
+            .collect();
+        if credits.is_empty() {
+            continue;
+        }
+        let debits: Vec<usize> = indices
+            .iter()
+            .copied()
+            .filter(|&i| transactions[i].amount < 0.0)
+            .collect();
+
+        for credit_idx in credits {
+            let credit = &transactions[credit_idx];
+            let credit_code = credit.analysis_code.replace('-', "");
+            let matched = debits.iter().any(|&debit_idx| {
+                let debit = &transactions[debit_idx];
+                let debit_code = debit.analysis_code.replace('-', "");
+                (credit_code.len() >= 4 && debit.account_number.contains(&credit_code))
+                    || (debit_code.len() >= 4 && credit.account_number.contains(&debit_code))
+            });
+            if matched {
+                related[credit_idx] = true;
+                // counted stays false → LoanRepaymentOnly (skip_loan_transfer)
             }
         }
     }
@@ -52,19 +103,8 @@ pub fn detect_loan_repayments(transactions: &[Transaction]) -> LoanRepaymentFlag
     LoanRepaymentFlags { related, counted }
 }
 
-fn looks_like_loan_repayment_candidate(tx: &Transaction) -> bool {
-    let fields = [
-        tx.transaction_type.as_str(),
-        tx.source.as_str(),
-        tx.other_party.as_str(),
-        tx.particulars.as_str(),
-        tx.analysis_code.as_str(),
-        tx.reference.as_str(),
-    ];
-
-    fields
-        .iter()
-        .any(|value| value.to_lowercase().contains("loan repayment"))
+fn is_loan_repayment_other_party(tx: &Transaction) -> bool {
+    tx.other_party.to_lowercase().contains("loan repayment")
 }
 
 /// Yields all `(i, j)` index pairs (i < j) where the two transactions are on the
