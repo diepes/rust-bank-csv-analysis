@@ -56,35 +56,25 @@ large block making it hard to see which behaviour each test covered.
 
 ---
 
-## Remaining Candidates
+### ✅ #3 — Extract shared pair-detection scaffold (detection.rs)
 
-### #3 — Extract shared pair-detection scaffold
+**Problem:** `detect_internal_transfers` and `detect_card_payments` shared an identical
+scaffold (group by date+amount-cents, nested i×j pair loop, same-account + same-sign
+guards). A bug in the pairing logic would need fixing in two places.
 
-**Files:** `src/calc_summary/detection.rs`
-
-**Problem:** `detect_internal_transfers` and `detect_card_payments` share an identical
-scaffold:
-1. Build `HashMap<(NaiveDate, i64), Vec<usize>>` grouping by `(date, abs-amount-cents)`
-2. Nested `i×j` pair loop
-3. Check accounts differ and signs differ
-4. Apply a heuristic predicate
-
-Only the final predicate differs. The scaffold is copy-pasted, so a bug in the pairing
-logic (e.g. the cross-account check) would need fixing in two places.
-
-**Solution:** Extract a private function:
-
-```rust
-fn candidate_pairs(transactions: &[Transaction]) -> impl Iterator<Item=(usize, usize)> + '_
-```
-
-It should yield all `(i, j)` index pairs where accounts differ, signs differ, same date,
-and same absolute amount. Both `detect_internal_transfers` and `detect_card_payments`
-become a filter over that iterator with their respective predicates.
+**What was done:**
+- Extracted `candidate_pairs(transactions)` — a private function that builds the
+  `HashMap<(NaiveDate, i64), Vec<usize>>` once, iterates all `(i, j)` pairs, and
+  yields only pairs where accounts differ, signs differ, date matches, and absolute
+  amount matches.
+- Both `detect_internal_transfers` and `detect_card_payments` are now a `for` loop
+  over `candidate_pairs` with their respective heuristic predicates — no duplicated
+  grouping or guard logic.
+- All 23 tests pass; no public API changes.
 
 ---
 
-## Suggested order
+## Remaining Candidates
 
-#3 (moderate, removes copy-pasted pair-detection scaffold).
+*(none at this time)*
 

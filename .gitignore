@@ -25,3 +25,6 @@ target
 
 # editor
 .vscode/
+
+# Copilot CLI agent skills (runtime, not source)
+.agents/

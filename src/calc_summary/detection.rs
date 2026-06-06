@@ -95,58 +95,65 @@ fn normalize_signature_piece(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
 }
 
-pub fn detect_internal_transfers(transactions: &[Transaction]) -> Vec<bool> {
-    let mut flags = vec![false; transactions.len()];
+/// Yields all `(i, j)` index pairs (i < j) where the two transactions are on the
+/// same date, have the same absolute amount, belong to different accounts, and
+/// have opposite signs.  This is the common scaffolding shared by both transfer
+/// detectors; each detector applies its own heuristic predicate on top.
+fn candidate_pairs(transactions: &[Transaction]) -> impl Iterator<Item = (usize, usize)> + '_ {
     let mut groups: HashMap<(NaiveDate, i64), Vec<usize>> = HashMap::new();
 
     for (idx, tx) in transactions.iter().enumerate() {
         if tx.amount == 0.0 {
             continue;
         }
-
         let amount_cents = (tx.amount.abs() * 100.0).round() as i64;
-        let key = (tx.date, amount_cents);
-        groups.entry(key).or_default().push(idx);
+        groups.entry((tx.date, amount_cents)).or_default().push(idx);
     }
 
-    for indices in groups.values() {
+    groups.into_values().flat_map(move |indices| {
+        let mut pairs = Vec::new();
         for i in 0..indices.len() {
             for j in (i + 1)..indices.len() {
                 let a_idx = indices[i];
                 let b_idx = indices[j];
                 let a = &transactions[a_idx];
                 let b = &transactions[b_idx];
-
-                if a.account_number == b.account_number {
-                    continue;
-                }
-                if (a.amount > 0.0) == (b.amount > 0.0) {
-                    continue;
-                }
-
-                let has_transfer_code = a.analysis_code.eq_ignore_ascii_case("TRANSFER")
-                    || b.analysis_code.eq_ignore_ascii_case("TRANSFER");
-                let same_reference = !a.reference.trim().is_empty()
-                    && a.reference.trim().eq_ignore_ascii_case(b.reference.trim());
-                let same_particulars = !a.particulars.trim().is_empty()
-                    && a.particulars.trim().eq_ignore_ascii_case(b.particulars.trim());
-                let payment_received_card_pair = (looks_like_payment_received(a)
-                    && looks_like_card_transfer_outgoing(b))
-                    || (looks_like_payment_received(b) && looks_like_card_transfer_outgoing(a));
-
-                let from_to_pair = (looks_like_from_account_counterparty(a)
-                    && looks_like_to_account_counterparty(b))
-                    || (looks_like_from_account_counterparty(b)
-                        && looks_like_to_account_counterparty(a));
-
-                if payment_received_card_pair
-                    || ((has_transfer_code || from_to_pair)
-                        && (same_reference || same_particulars || from_to_pair))
-                {
-                    flags[a_idx] = true;
-                    flags[b_idx] = true;
+                if a.account_number != b.account_number && (a.amount > 0.0) != (b.amount > 0.0) {
+                    pairs.push((a_idx, b_idx));
                 }
             }
+        }
+        pairs
+    })
+}
+
+pub fn detect_internal_transfers(transactions: &[Transaction]) -> Vec<bool> {
+    let mut flags = vec![false; transactions.len()];
+
+    for (a_idx, b_idx) in candidate_pairs(transactions) {
+        let a = &transactions[a_idx];
+        let b = &transactions[b_idx];
+
+        let has_transfer_code = a.analysis_code.eq_ignore_ascii_case("TRANSFER")
+            || b.analysis_code.eq_ignore_ascii_case("TRANSFER");
+        let same_reference = !a.reference.trim().is_empty()
+            && a.reference.trim().eq_ignore_ascii_case(b.reference.trim());
+        let same_particulars = !a.particulars.trim().is_empty()
+            && a.particulars.trim().eq_ignore_ascii_case(b.particulars.trim());
+        let payment_received_card_pair = (looks_like_payment_received(a)
+            && looks_like_card_transfer_outgoing(b))
+            || (looks_like_payment_received(b) && looks_like_card_transfer_outgoing(a));
+        let from_to_pair = (looks_like_from_account_counterparty(a)
+            && looks_like_to_account_counterparty(b))
+            || (looks_like_from_account_counterparty(b)
+                && looks_like_to_account_counterparty(a));
+
+        if payment_received_card_pair
+            || ((has_transfer_code || from_to_pair)
+                && (same_reference || same_particulars || from_to_pair))
+        {
+            flags[a_idx] = true;
+            flags[b_idx] = true;
         }
     }
 
@@ -165,42 +172,16 @@ fn looks_like_from_account_counterparty(tx: &Transaction) -> bool {
 
 pub fn detect_card_payments(transactions: &[Transaction]) -> Vec<bool> {
     let mut flags = vec![false; transactions.len()];
-    let mut groups: HashMap<(NaiveDate, i64), Vec<usize>> = HashMap::new();
 
-    for (idx, tx) in transactions.iter().enumerate() {
-        if tx.amount == 0.0 {
-            continue;
-        }
+    for (a_idx, b_idx) in candidate_pairs(transactions) {
+        let a = &transactions[a_idx];
+        let b = &transactions[b_idx];
 
-        let amount_cents = (tx.amount.abs() * 100.0).round() as i64;
-        groups.entry((tx.date, amount_cents)).or_default().push(idx);
-    }
-
-    for indices in groups.values() {
-        for i in 0..indices.len() {
-            for j in (i + 1)..indices.len() {
-                let a_idx = indices[i];
-                let b_idx = indices[j];
-                let a = &transactions[a_idx];
-                let b = &transactions[b_idx];
-
-                if a.account_number == b.account_number {
-                    continue;
-                }
-                if (a.amount > 0.0) == (b.amount > 0.0) {
-                    continue;
-                }
-
-                let looks_like_pair = (looks_like_payment_received(a)
-                    && looks_like_card_transfer_outgoing(b))
-                    || (looks_like_payment_received(b) && looks_like_card_transfer_outgoing(a));
-                if !looks_like_pair {
-                    continue;
-                }
-
-                flags[a_idx] = true;
-                flags[b_idx] = true;
-            }
+        if (looks_like_payment_received(a) && looks_like_card_transfer_outgoing(b))
+            || (looks_like_payment_received(b) && looks_like_card_transfer_outgoing(a))
+        {
+            flags[a_idx] = true;
+            flags[b_idx] = true;
         }
     }
 
