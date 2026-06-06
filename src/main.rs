@@ -1,10 +1,10 @@
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
-use chrono::Datelike;
+use anyhow::Result;
 use clap::Parser;
 use rust_bank_csv_analysis::{
-    nz_period_for_year, read_transactions, summarize_for_period, write_xlsx,
+    latest_full_tax_year_start, nz_period_for_year, read_transactions,
+    resolve_summary_definitions, summarize_for_period, write_xlsx,
 };
 
 #[derive(Parser, Debug)]
@@ -18,6 +18,8 @@ struct Cli {
     output: PathBuf,
     #[arg(long)]
     tax_year_start: Option<i32>,
+    #[arg(long)]
+    summary_config: Option<PathBuf>,
     #[arg(required = true)]
     csv_files: Vec<PathBuf>,
 }
@@ -28,16 +30,21 @@ fn run() -> Result<()> {
 
     let start_year = cli
         .tax_year_start
-        .or_else(|| transactions.first().map(|tx| tx.date.year()))
-        .context("no transactions found; use --tax-year-start when input is empty")?;
+        .unwrap_or_else(latest_full_tax_year_start);
     let (period_start, period_end) = nz_period_for_year(start_year)?;
-    let summary = summarize_for_period(&transactions, period_start, period_end);
+    let summary_definitions = resolve_summary_definitions(cli.summary_config.as_ref())?;
+    let summary = summarize_for_period(
+        &transactions,
+        period_start,
+        period_end,
+        &summary_definitions,
+    )?;
     write_xlsx(
         &cli.output,
         &transactions,
         period_start,
         period_end,
-        summary,
+        &summary,
     )?;
 
     println!("Created: {}", cli.output.display());
@@ -46,11 +53,13 @@ fn run() -> Result<()> {
         period_start.format("%Y%m%d"),
         period_end.format("%Y%m%d")
     );
-    println!("Total power payments: {:.2}", summary.power_payments_total);
-    println!(
-        "Total mortgage interest: {:.2}",
-        summary.mortgage_interest_total
-    );
+    for item in &summary.items {
+        if item.description.is_empty() {
+            println!("{}: {:.2}", item.name, item.total);
+        } else {
+            println!("{} ({}): {:.2}", item.name, item.description, item.total);
+        }
+    }
 
     Ok(())
 }

@@ -1,0 +1,23 @@
+power_payments_total:
+  description: Total power payments
+  regex: 'power|electric|electricity'
+
+mortgage_interest_total:
+  description: Total mortgage interest
+  regex: 'mortgage.*interest|interest.*mortgage'
+
+groceries_total:
+  description: Total groceries
+  regex: 'new\s*world|pak\s*n\s*save|countdown|supermarket|grocer(y|ies)'
+
+insurance_total:
+  description: Total insurance payments
+  regex: 'insurance|insurer|premium'
+
+rates_total:
+  description: Total council rates
+  regex: '\brates\b|council\s+rates'
+
+internet_phone_total:
+  description: Total internet and phone
+  regex: 'internet|broadband|fiber|fibre|mobile|phone'

@@ -1,10 +1,17 @@
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow};
-use chrono::NaiveDate;
+use chrono::{Datelike, Local, NaiveDate};
 use csv::ReaderBuilder;
 use rust_xlsxwriter::Workbook;
 use serde::Deserialize;
+
+pub mod calc_summary;
+
+pub use calc_summary::{
+    Summary, SummaryDefinition, default_summary_definitions, load_summary_definitions,
+    summarize_for_period,
+};
 
 const DATE_FMT: &str = "%Y%m%d";
 
@@ -23,12 +30,6 @@ pub struct Transaction {
     pub serial_number: String,
     pub account_code: String,
     pub unique_id: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Summary {
-    pub power_payments_total: f64,
-    pub mortgage_interest_total: f64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -117,34 +118,6 @@ pub fn read_transactions(paths: &[impl AsRef<Path>]) -> Result<Vec<Transaction>>
     Ok(all)
 }
 
-pub fn summarize_for_period(
-    transactions: &[Transaction],
-    period_start: NaiveDate,
-    period_end: NaiveDate,
-) -> Summary {
-    let mut summary = Summary {
-        power_payments_total: 0.0,
-        mortgage_interest_total: 0.0,
-    };
-
-    for tx in transactions
-        .iter()
-        .filter(|tx| tx.date >= period_start && tx.date <= period_end)
-    {
-        if tx.amount >= 0.0 {
-            continue;
-        }
-        if is_power_payment(tx) {
-            summary.power_payments_total += -tx.amount;
-        }
-        if is_mortgage_interest(tx) {
-            summary.mortgage_interest_total += -tx.amount;
-        }
-    }
-
-    summary
-}
-
 pub fn nz_period_for_year(start_year: i32) -> Result<(NaiveDate, NaiveDate)> {
     let start = NaiveDate::from_ymd_opt(start_year, 4, 1)
         .ok_or_else(|| anyhow!("invalid start year {start_year}"))?;
@@ -153,28 +126,34 @@ pub fn nz_period_for_year(start_year: i32) -> Result<(NaiveDate, NaiveDate)> {
     Ok((start, end))
 }
 
-fn searchable_text(tx: &Transaction) -> String {
-    format!(
-        "{} {} {} {} {} {} {} {}",
-        tx.transaction_type,
-        tx.source,
-        tx.other_party,
-        tx.particulars,
-        tx.reference,
-        tx.analysis_code,
-        tx.serial_number,
-        tx.account_code
-    )
-    .to_lowercase()
+pub fn latest_full_tax_year_start() -> i32 {
+    latest_full_tax_year_start_for_date(Local::now().date_naive())
 }
 
-fn is_power_payment(tx: &Transaction) -> bool {
-    searchable_text(tx).contains("power")
+pub fn latest_full_tax_year_start_for_date(today: NaiveDate) -> i32 {
+    let current_year_apr_1 = NaiveDate::from_ymd_opt(today.year(), 4, 1)
+        .expect("valid date for 1 April");
+
+    if today >= current_year_apr_1 {
+        today.year() - 1
+    } else {
+        today.year() - 2
+    }
 }
 
-fn is_mortgage_interest(tx: &Transaction) -> bool {
-    let txt = searchable_text(tx);
-    txt.contains("mortgage interest") || (txt.contains("mortgage") && txt.contains("interest"))
+pub fn resolve_summary_definitions(
+    summary_config_path: Option<impl AsRef<Path>>,
+) -> Result<Vec<SummaryDefinition>> {
+    if let Some(path) = summary_config_path {
+        return load_summary_definitions(path);
+    }
+
+    let default_path = Path::new("summary.yaml");
+    if default_path.exists() {
+        return load_summary_definitions(default_path);
+    }
+
+    Ok(default_summary_definitions())
 }
 
 pub fn write_xlsx(
@@ -182,7 +161,7 @@ pub fn write_xlsx(
     transactions: &[Transaction],
     period_start: NaiveDate,
     period_end: NaiveDate,
-    summary: Summary,
+    summary: &Summary,
 ) -> Result<()> {
     let mut workbook = Workbook::new();
     let worksheet = workbook.add_worksheet();
@@ -231,10 +210,16 @@ pub fn write_xlsx(
     summary_ws.write_string(0, 1, period_start.format(DATE_FMT).to_string())?;
     summary_ws.write_string(1, 0, "Tax period end")?;
     summary_ws.write_string(1, 1, period_end.format(DATE_FMT).to_string())?;
-    summary_ws.write_string(2, 0, "Total power payments")?;
-    summary_ws.write_number(2, 1, summary.power_payments_total)?;
-    summary_ws.write_string(3, 0, "Total mortgage interest")?;
-    summary_ws.write_number(3, 1, summary.mortgage_interest_total)?;
+    summary_ws.write_string(3, 0, "Name")?;
+    summary_ws.write_string(3, 1, "Description")?;
+    summary_ws.write_string(3, 2, "Total")?;
+
+    for (idx, item) in summary.items.iter().enumerate() {
+        let row = (idx + 4) as u32;
+        summary_ws.write_string(row, 0, &item.name)?;
+        summary_ws.write_string(row, 1, &item.description)?;
+        summary_ws.write_number(row, 2, item.total)?;
+    }
 
     workbook
         .save(output_path.as_ref())
@@ -247,64 +232,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn summarizes_matching_categories_for_apr_to_may_window() {
-        let txs = vec![
-            Transaction {
-                account_number: "1".into(),
-                date: NaiveDate::from_ymd_opt(2025, 4, 2).unwrap(),
-                amount: -120.0,
-                transaction_code: String::new(),
-                transaction_type: "AUTOMATIC PAYMENT".into(),
-                source: String::new(),
-                other_party: "Power Co".into(),
-                particulars: String::new(),
-                analysis_code: String::new(),
-                reference: String::new(),
-                serial_number: String::new(),
-                account_code: String::new(),
-                unique_id: "202504020001".into(),
-            },
-            Transaction {
-                account_number: "1".into(),
-                date: NaiveDate::from_ymd_opt(2025, 5, 15).unwrap(),
-                amount: -500.0,
-                transaction_code: String::new(),
-                transaction_type: "AUTOMATIC PAYMENT".into(),
-                source: String::new(),
-                other_party: "ABC Mortgage".into(),
-                particulars: "mortgage interest".into(),
-                analysis_code: String::new(),
-                reference: String::new(),
-                serial_number: String::new(),
-                account_code: String::new(),
-                unique_id: "202505150001".into(),
-            },
-            Transaction {
-                account_number: "1".into(),
-                date: NaiveDate::from_ymd_opt(2025, 6, 1).unwrap(),
-                amount: -220.0,
-                transaction_code: String::new(),
-                transaction_type: "AUTOMATIC PAYMENT".into(),
-                source: String::new(),
-                other_party: "Power Co".into(),
-                particulars: String::new(),
-                analysis_code: String::new(),
-                reference: String::new(),
-                serial_number: String::new(),
-                account_code: String::new(),
-                unique_id: "202506010001".into(),
-            },
-        ];
+    fn latest_full_tax_year_start_after_april_first() {
+        let date = NaiveDate::from_ymd_opt(2026, 6, 6).unwrap();
+        assert_eq!(latest_full_tax_year_start_for_date(date), 2025);
+    }
 
-        let (start, end) = nz_period_for_year(2025).unwrap();
-        let summary = summarize_for_period(&txs, start, end);
+    #[test]
+    fn latest_full_tax_year_start_before_april_first() {
+        let date = NaiveDate::from_ymd_opt(2026, 3, 31).unwrap();
+        assert_eq!(latest_full_tax_year_start_for_date(date), 2024);
+    }
 
-        assert_eq!(
-            summary,
-            Summary {
-                power_payments_total: 120.0,
-                mortgage_interest_total: 500.0
-            }
-        );
+    #[test]
+    fn latest_full_tax_year_start_on_april_first() {
+        let date = NaiveDate::from_ymd_opt(2026, 4, 1).unwrap();
+        assert_eq!(latest_full_tax_year_start_for_date(date), 2025);
     }
 }
