@@ -33,33 +33,18 @@ pub fn classify_transactions(transactions: &mut [Transaction]) {
 pub fn detect_loan_repayments(transactions: &[Transaction]) -> LoanRepaymentFlags {
     let mut related = vec![false; transactions.len()];
     let mut counted = vec![false; transactions.len()];
-    let mut groups: HashMap<(NaiveDate, String), Vec<usize>> = HashMap::new();
 
-    for (idx, tx) in transactions.iter().enumerate() {
-        if tx.amount == 0.0 || !looks_like_loan_repayment_candidate(tx) {
-            continue;
-        }
+    for (a_idx, b_idx) in candidate_pairs(transactions) {
+        let a = &transactions[a_idx];
+        let b = &transactions[b_idx];
 
-        groups
-            .entry((tx.date, loan_repayment_signature(tx)))
-            .or_default()
-            .push(idx);
-    }
-
-    for indices in groups.values() {
-        if indices.is_empty() || indices.len() > 3 {
-            continue;
-        }
-
-        let has_negative = indices.iter().any(|idx| transactions[*idx].amount < 0.0);
-        if !has_negative {
-            continue;
-        }
-
-        for idx in indices {
-            related[*idx] = true;
-            if transactions[*idx].amount < 0.0 {
-                counted[*idx] = true;
+        if looks_like_loan_repayment_candidate(a) && looks_like_loan_repayment_candidate(b) {
+            related[a_idx] = true;
+            related[b_idx] = true;
+            if a.amount < 0.0 {
+                counted[a_idx] = true;
+            } else {
+                counted[b_idx] = true;
             }
         }
     }
@@ -80,25 +65,6 @@ fn looks_like_loan_repayment_candidate(tx: &Transaction) -> bool {
     fields
         .iter()
         .any(|value| value.to_lowercase().contains("loan repayment"))
-}
-
-fn loan_repayment_signature(tx: &Transaction) -> String {
-    format!(
-        "{}|{}|{}|{}|{}",
-        normalize_signature_piece(&tx.transaction_type),
-        normalize_signature_piece(&tx.other_party),
-        normalize_signature_piece(&tx.particulars),
-        normalize_signature_piece(&tx.analysis_code),
-        normalize_signature_piece(&tx.reference),
-    )
-}
-
-fn normalize_signature_piece(value: &str) -> String {
-    value
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_lowercase()
 }
 
 /// Yields all `(i, j)` index pairs (i < j) where the two transactions are on the

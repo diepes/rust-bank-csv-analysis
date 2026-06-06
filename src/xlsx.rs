@@ -130,8 +130,10 @@ fn write_transactions_sheet(
         // Summary label column
         let label = match tx.class {
             TransactionClass::LoanRepaymentCounted => Some("loan_repayment_total"),
-            TransactionClass::CardPayment => Some("card_payment"),
-            TransactionClass::InternalTransfer => Some("transfer_internal"),
+            TransactionClass::LoanRepaymentOnly => Some("skip_loan_transfer"),
+            TransactionClass::CardPayment | TransactionClass::InternalTransfer => {
+                Some("skip_inter_account")
+            }
             _ => None,
         };
         if let Some(l) = label {

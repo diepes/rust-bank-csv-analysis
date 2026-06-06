@@ -6,9 +6,9 @@
 
 **Transaction Class** — the role assigned to a transaction after inter-account analysis. One of:
 - `Countable` — contributes to summary totals.
-- `InternalTransfer` — a pair of entries representing money moving between the user's own accounts; excluded from totals.
-- `CardPayment` — a card top-up or card payment pair across accounts; excluded from totals.
-- `LoanRepaymentOnly` — the non-negative side of a loan repayment pair; excluded from totals.
+- `InternalTransfer` — a pair of entries representing money moving between the user's own accounts; excluded from totals. Shown as `skip_inter_account` in the XLSX Summary column.
+- `CardPayment` — a card top-up or card payment pair across accounts; excluded from totals. Shown as `skip_inter_account` in the XLSX Summary column.
+- `LoanRepaymentOnly` — the non-negative side of a loan repayment pair (the credit leg at the loan account); excluded from totals. Shown as `skip_loan_transfer` in the XLSX Summary column.
 - `LoanRepaymentCounted` — the negative side of a loan repayment pair; counted in its own `loan_repayment_total` bucket.
 
 Classification priority when a transaction matches multiple detectors: `CardPayment` > `InternalTransfer` > loan repayment variants > `Countable`.
@@ -25,11 +25,13 @@ Classification priority when a transaction matches multiple detectors: `CardPaym
 
 **Loan Repayment Detection** — identifies groups of transactions on the same date with a matching loan-repayment signature, where at least one side is negative. The negative side(s) become `LoanRepaymentCounted`; others become `LoanRepaymentOnly`.
 
-**Sign Lock** — a per-**Summary Definition** guard (`lock_sign_on_first_match: true`) that tracks the sign of the first matched transaction and checks all subsequent matches against it. Detects misconfigured regexes that accidentally capture income into an expense category.
+**Sign Lock** — a per-**Summary Definition** guard (`lock_sign_on_first_match: true`) that tracks the sign of the first matched transaction and checks all subsequent matches against it. For expense definitions the expected sign is negative; for income definitions (`income: true`) the expected sign is positive. Detects misconfigured regexes that accidentally capture the wrong category.
 
-**Sign Reversal** — a transaction whose sign (positive/negative) differs from the first-matched transaction in the same **Summary Definition** when that definition has **Sign Lock** enabled. A legitimate store return credit is a sign reversal; so is a misconfigured regex — the two are distinguished by whether the first-ever match was positive (fatal: regex likely wrong) or negative (warning: plausible return/refund).
+**Sign Reversal** — a transaction whose sign (positive/negative) differs from the first-matched transaction in the same **Summary Definition** when that definition has **Sign Lock** enabled. A legitimate store return credit is a sign reversal on an expense category; a salary clawback is a sign reversal on an income category. The two are distinguished from a misconfigured regex by whether the first-ever match itself had the wrong sign (fatal) or the right sign (warning for subsequent reversals).
 
-**Sign Reversal Warning** — a value returned alongside a **Summary** when a **Sign Reversal** is detected. Carries the summary name, file path, and line number of the offending transaction. The XLSX writer uses this list to apply a blue row highlight to each reversed transaction; `main.rs` prints each warning to stderr.
+**Sign Reversal Warning** — a value returned by `annotate()` when a **Sign Reversal** is detected. Carries the summary name, file path, and line number of the offending transaction. The XLSX writer uses this list to apply a blue row highlight to each reversed transaction; `main.rs` prints each warning to stderr.
+
+**Income Summary** — a **Summary Definition** with `income: true`, used for categories where transactions are credits (positive amounts), such as salary. Flips the **Sign Lock** expected sign from negative to positive.
 
 
 

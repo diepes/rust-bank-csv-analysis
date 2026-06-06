@@ -124,3 +124,46 @@ slice — 3× compiles (and 3× regex builds) per run.
 
 *(none at this time)*
 
+---
+
+### ✅ #6 — Transaction Enrichment Model (`annotate` step)
+
+**Problem:** `xlsx.rs` re-ran the full regex set on every transaction to decide row colours
+and column values. `summarize_for_period` also ran its own regex pass. The same patterns
+were compiled and matched 2× per run on the same data.
+
+**What was done:**
+- Added `summary_name: Option<String>` and `is_sign_reversed: bool` to the `Transaction`
+  struct (both in `Default`; `None`/`false` at CSV parse time).
+- Added `SignReversalWarning { summary_name, source_file, source_line }` to `types.rs`.
+- Added `CompiledSummarySet::annotate(&self, &mut [Transaction]) -> Result<Vec<SignReversalWarning>>`
+  which runs once over all transactions, stamps `tx.summary_name` and `tx.is_sign_reversed`,
+  and returns any sign-reversal warnings. Fatal if a sign-locked summary's very first match
+  has the wrong sign (likely misconfigured regex).
+- Rewrote `summarize_for_period` to read `tx.summary_name` / `tx.is_sign_reversed` — zero
+  regex work.
+- Rewrote `xlsx.rs` to read the same fields — removed the `matched_names`/`matched_in_period`
+  Vec allocations and the second regex pass.
+- Updated `main.rs` to call `annotate()` after `compile()` and print warnings to stderr.
+- All 25 tests pass; the pipeline now has three clearly-separated enrichment stages:
+  (1) CSV parse → raw fields, (2) `classify_transactions` → `tx.class`,
+  (3) `annotate` → `tx.summary_name` / `tx.is_sign_reversed`.
+
+---
+
+### ✅ #7 — `income: true` flag for credit-first Summary Definitions
+
+**Problem:** The sign-lock logic assumed all summaries were expenses (first match negative).
+Salary and other income categories failed with a fatal error on their first positive credit.
+
+**What was done:**
+- Added `income: bool` (default `false`) to `SummaryDefinition` and `SummaryDefinitionBody`
+  (YAML-deserialised; also propagated through to `CompiledSummaryDefinition`).
+- `annotate()` reads `def.income` to determine `expected_positive`; the fatal / warning
+  branches are symmetric for both directions.
+- `SummaryDefinitionBody` in `config.rs` now also deserialises `lock_sign_on_first_match`
+  directly from YAML (previously it was hardcoded to the default in Named-map parsing).
+- Two new tests: `income_summary_accepts_positive_and_warns_on_negative` and
+  `income_summary_fatal_on_first_negative`.
+- All 25 tests pass.
+
