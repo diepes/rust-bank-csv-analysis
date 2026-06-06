@@ -69,12 +69,49 @@ The generated workbook contains:
   - Includes `Summary` column with the first matching summary name for each row (blank if unmatched).
 - `Summary`: totals for the period `1 April` to `31 May` of `--tax-year-start` for each configured summary definition.
   - Each transaction is assigned to the first matching regex (in YAML order).
-  - Two built-in rows are always added:
+  - Three built-in rows are always added:
+    - `loan_repayment_total`: negative loan repayment rows that were detected as related activity
     - `no_match`: transactions that matched no configured regex
     - `total`: total of all non-zero transactions in the period (by absolute value)
-  - The code validates that configured totals + `no_match` equals `total`.
+  - The code validates that configured totals + `loan_repayment_total` + `no_match` equals `total`.
   - By default each summary locks sign on first match (`lock_sign_on_first_match: true`).
     If a later matched transaction has the opposite sign, processing fails and reports both the first match file/line and offending file/line.
+
+## Transfer Heuristics
+
+Rows that look like transfers between accounts are ignored from all summary calculations and are highlighted in yellow in the `Transactions` sheet.
+
+`transfer_internal` is detected when a row pair matches all of these conditions:
+- different accounts
+- same date
+- same absolute amount
+- opposite signs
+- and either:
+  - one side has `Analysis (Code) = TRANSFER`, or
+  - the counterparties look like `From ...` and `To ...` account transfers
+- plus an additional relationship signal, such as matching `Reference`, matching `Particulars`, or a clear `From`/`To` pair
+
+`card_payment` is detected when a pair looks like a card top-up / card payment transfer:
+- different accounts
+- same date
+- same absolute amount
+- opposite signs
+- one side looks like `PAYMENT RECEIVED ...`
+- the other side looks like `To ************....`
+
+Matched `transfer_internal` rows use a lighter yellow, while `card_payment` rows use a stronger yellow.
+
+## Loan Repayments
+
+Rows that look like loan repayment activity are highlighted in light blue in the `Transactions` sheet.
+
+`loan_repayment_total` is detected when a small related group of rows matches the loan repayment pattern:
+- the transaction text includes `loan repayment`
+- rows share the same date
+- related rows usually come in groups of 2, and can be up to 3 rows
+- only negative rows are counted in the `loan_repayment_total` summary line
+
+Positive companion rows in the same loan repayment group are shown in the workbook but are not counted toward the summary total.
 
 Summary configuration is validated before use and will fail fast for common issues such as:
 - duplicate summary names

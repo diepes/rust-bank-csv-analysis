@@ -11,7 +11,8 @@ pub mod calc_summary;
 pub mod check_summay;
 
 pub use calc_summary::{
-    Summary, SummaryDefinition, default_summary_definitions, load_summary_definitions,
+    Summary, SummaryDefinition, default_summary_definitions, detect_card_payments,
+    detect_internal_transfers, detect_loan_repayments, load_summary_definitions,
     matched_summary_names, matched_transactions, matched_transactions_for_period,
     summarize_for_period,
 };
@@ -203,6 +204,9 @@ pub fn write_xlsx(
     let mut workbook = Workbook::new();
     let worksheet = workbook.add_worksheet();
     worksheet.set_name("Transactions")?;
+    let internal_transfer_flags = detect_internal_transfers(transactions);
+    let card_payment_flags = detect_card_payments(transactions);
+    let loan_repayment_flags = detect_loan_repayments(transactions);
     let matched_summary_names = matched_summary_names(transactions, summary_definitions)?;
     let matched_rows: Vec<bool> = matched_summary_names
         .iter()
@@ -226,6 +230,9 @@ pub fn write_xlsx(
     let matched_in_period_format = Format::new().set_background_color(Color::RGB(0xE2F0D9));
     let matched_outside_period_format =
         Format::new().set_background_color(Color::RGB(0xC6EFD6));
+    let loan_repayment_format = Format::new().set_background_color(Color::RGB(0xD9EAF7));
+    let internal_transfer_format = Format::new().set_background_color(Color::RGB(0xFFF2CC));
+    let card_payment_format = Format::new().set_background_color(Color::RGB(0xFFE599));
 
     let headers = [
         "Account Number",
@@ -244,13 +251,42 @@ pub fn write_xlsx(
         "Summary",
     ];
 
+    let column_widths = [
+        18.0, // Account Number
+        12.0, // Date
+        12.0, // Amount
+        18.0, // Transaction Code
+        22.0, // Transaction Type
+        20.0, // Source
+        24.0, // Other Party
+        28.0, // Particulars
+        18.0, // Analysis (Code)
+        16.0, // Reference
+        16.0, // Serial Number
+        14.0, // Account Code
+        18.0, // Unique ID
+        22.0, // Summary
+    ];
+
+    for (col, width) in column_widths.iter().enumerate() {
+        worksheet.set_column_width(col as u16, *width)?;
+    }
+
     for (col, header) in headers.iter().enumerate() {
         worksheet.write_string(0, col as u16, *header)?;
     }
 
+    worksheet.set_freeze_panes(1, 0)?;
+
     for (idx, tx) in transactions.iter().enumerate() {
         let row = (idx + 1) as u32;
-        if matched_rows[idx] {
+        if loan_repayment_flags.related[idx] {
+            worksheet.set_row_format(row, &loan_repayment_format)?;
+        } else if card_payment_flags[idx] {
+            worksheet.set_row_format(row, &card_payment_format)?;
+        } else if internal_transfer_flags[idx] {
+            worksheet.set_row_format(row, &internal_transfer_format)?;
+        } else if matched_rows[idx] {
             if let Some(summary_name) = matched_summary_names[idx].as_deref() {
                 if let Some(rgb) = summary_colors.get(summary_name) {
                     let summary_color_format = Format::new().set_background_color(Color::RGB(*rgb));
@@ -279,10 +315,20 @@ pub fn write_xlsx(
         worksheet.write_string(row, 10, &tx.serial_number)?;
         worksheet.write_string(row, 11, &tx.account_code)?;
         worksheet.write_string(row, 12, &tx.unique_id)?;
-        if let Some(summary_name) = &matched_summary_names[idx] {
+        if loan_repayment_flags.counted[idx] {
+            worksheet.write_string(row, 13, "loan_repayment_total")?;
+        } else if card_payment_flags[idx] {
+            worksheet.write_string(row, 13, "card_payment")?;
+        } else if internal_transfer_flags[idx] {
+            worksheet.write_string(row, 13, "transfer_internal")?;
+        } else if let Some(summary_name) = &matched_summary_names[idx] {
             worksheet.write_string(row, 13, summary_name)?;
         }
     }
+
+    let last_row = transactions.len() as u32;
+    let last_col = (headers.len() - 1) as u16;
+    worksheet.autofilter(0, 0, last_row, last_col)?;
 
     let summary_ws = workbook.add_worksheet();
     summary_ws.set_name("Summary")?;
