@@ -9,9 +9,10 @@ pub mod calc_summary;
 pub mod xlsx;
 
 pub use calc_summary::{
-    CompiledSummarySet, Summary, SummaryDefinition, TransactionClass, classify_transactions,
-    default_summary_definitions, detect_card_payments, detect_internal_transfers,
-    detect_loan_repayments, load_summary_definitions, parse_summary_color,
+    CompiledSummarySet, SignReversalWarning, Summary, SummaryDefinition, TransactionClass,
+    classify_transactions, default_summary_definitions, detect_card_payments,
+    detect_internal_transfers, detect_loan_repayments, load_summary_definitions,
+    parse_summary_color,
 };
 pub use xlsx::write_xlsx;
 
@@ -36,6 +37,11 @@ pub struct Transaction {
     pub source_line: usize,
     /// Assigned by `classify_transactions` after loading and sorting.
     pub class: TransactionClass,
+    /// Assigned by `CompiledSummarySet::annotate`; the first matching summary name.
+    pub summary_name: Option<String>,
+    /// Set by `CompiledSummarySet::annotate` when the transaction's sign differs from the
+    /// first match in the same summary (e.g. a store return credit). Highlighted blue in XLSX.
+    pub is_sign_reversed: bool,
 }
 
 impl Default for Transaction {
@@ -57,6 +63,8 @@ impl Default for Transaction {
             source_file: String::new(),
             source_line: 0,
             class: TransactionClass::Countable,
+            summary_name: None,
+            is_sign_reversed: false,
         }
     }
 }
@@ -120,6 +128,7 @@ impl TryFrom<RawTransaction> for Transaction {
             source_file: String::new(),
             source_line: 0,
             class: TransactionClass::Countable,
+            ..Default::default()
         })
     }
 }

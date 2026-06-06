@@ -1,10 +1,13 @@
 use anyhow::{Context, Result, anyhow};
 use chrono::NaiveDate;
 use regex::{Regex, RegexBuilder};
+use std::collections::HashMap;
 
 use crate::Transaction;
 
-use super::types::{Summary, SummaryDefinition, SummaryItem, TransactionClass};
+use super::types::{
+    SignReversalWarning, Summary, SummaryDefinition, SummaryItem, TransactionClass,
+};
 
 pub(crate) const NO_MATCH_SUMMARY_NAME: &str = "no_match";
 pub(crate) const TOTAL_SUMMARY_NAME: &str = "total";
@@ -15,6 +18,7 @@ struct CompiledSummaryDefinition {
     description: String,
     regex: Regex,
     lock_sign_on_first_match: bool,
+    income: bool,
     color: Option<String>,
 }
 
@@ -37,6 +41,7 @@ impl CompiledSummarySet {
                     description: def.description.clone(),
                     regex,
                     lock_sign_on_first_match: def.lock_sign_on_first_match,
+                    income: def.income,
                     color: def.color.clone(),
                 })
             })
@@ -46,8 +51,8 @@ impl CompiledSummarySet {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // reserved for future richer sign-reversal error messages
 struct SignLockState {
-    expected_positive: bool,
     first_file: String,
     first_line: usize,
 }
@@ -147,6 +152,93 @@ pub fn parse_summary_color(color: &str) -> Result<u32> {
 }
 
 impl CompiledSummarySet {
+    /// Assign `summary_name` and `is_sign_reversed` on every transaction.
+    ///
+    /// Runs on the full dataset (not just the period) so the Transactions sheet
+    /// shows names for all rows. Returns a warning for each sign reversal found.
+    /// Returns `Err` if a sign-locked summary's very first match is a credit —
+    /// that strongly indicates a misconfigured regex.
+    pub fn annotate(&self, transactions: &mut [Transaction]) -> Result<Vec<SignReversalWarning>> {
+        let compiled = &self.compiled;
+        let mut sign_locks: Vec<Option<SignLockState>> = vec![None; compiled.len()];
+        let mut warnings = Vec::new();
+
+        for tx in transactions.iter_mut() {
+            if tx.amount == 0.0
+                || matches!(
+                    tx.class,
+                    TransactionClass::InternalTransfer
+                        | TransactionClass::CardPayment
+                        | TransactionClass::LoanRepaymentOnly
+                        | TransactionClass::LoanRepaymentCounted
+                )
+            {
+                continue;
+            }
+
+            let text = searchable_text(tx);
+            if let Some((idx, def)) = compiled
+                .iter()
+                .enumerate()
+                .find(|(_, def)| def.regex.is_match(&text))
+            {
+                tx.summary_name = Some(def.name.clone());
+
+                if def.lock_sign_on_first_match {
+                    let is_positive = tx.amount > 0.0;
+                    // For income summaries the expected sign is positive; for
+                    // expense summaries it is negative.
+                    let expected_positive = def.income;
+                    let is_sign_ok = is_positive == expected_positive;
+                    match &sign_locks[idx] {
+                        None if !is_sign_ok => {
+                            let (expected_label, actual_label) = if expected_positive {
+                                ("income", "debit (negative)")
+                            } else {
+                                ("expense", "credit (positive)")
+                            };
+                            return Err(anyhow!(
+                                "misconfigured summary '{}': first matched transaction is a {} at '{}' line {}; {} summaries expect {} — check your regex or add `income: true` to the definition",
+                                def.name,
+                                actual_label,
+                                tx.source_file,
+                                tx.source_line,
+                                expected_label,
+                                if expected_positive {
+                                    "credits"
+                                } else {
+                                    "debits"
+                                },
+                            ));
+                        }
+                        None => {
+                            sign_locks[idx] = Some(SignLockState {
+                                first_file: tx.source_file.clone(),
+                                first_line: tx.source_line,
+                            });
+                        }
+                        Some(_) if !is_sign_ok => {
+                            tx.is_sign_reversed = true;
+                            warnings.push(SignReversalWarning {
+                                summary_name: def.name.clone(),
+                                source_file: tx.source_file.clone(),
+                                source_line: tx.source_line,
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        Ok(warnings)
+    }
+
+    /// Accumulate totals for transactions inside the period.
+    ///
+    /// Reads `tx.summary_name` and `tx.is_sign_reversed` set by `annotate`; does
+    /// no regex matching of its own. Sign-reversed transactions are subtracted from
+    /// their category total (net effect, e.g. a store return reduces hardware spend).
     pub fn summarize_for_period(
         &self,
         transactions: &[Transaction],
@@ -154,6 +246,13 @@ impl CompiledSummarySet {
         period_end: NaiveDate,
     ) -> Result<Summary> {
         let compiled = &self.compiled;
+
+        let name_to_idx: HashMap<&str, usize> = compiled
+            .iter()
+            .enumerate()
+            .map(|(i, def)| (def.name.as_str(), i))
+            .collect();
+
         let mut totals: Vec<SummaryItem> = compiled
             .iter()
             .map(|def| SummaryItem {
@@ -162,7 +261,7 @@ impl CompiledSummarySet {
                 total: 0.0,
             })
             .collect();
-        let mut sign_locks: Vec<Option<SignLockState>> = vec![None; compiled.len()];
+
         let mut loan_repayment_total = 0.0;
         let mut no_match_total = 0.0;
         let mut total = 0.0;
@@ -171,7 +270,6 @@ impl CompiledSummarySet {
             if tx.date < period_start || tx.date > period_end {
                 continue;
             }
-
             if matches!(
                 tx.class,
                 TransactionClass::InternalTransfer
@@ -180,57 +278,27 @@ impl CompiledSummarySet {
             ) {
                 continue;
             }
-
             if tx.amount == 0.0 {
                 continue;
             }
 
             let amount = tx.amount.abs();
-            total += amount;
 
             if tx.class == TransactionClass::LoanRepaymentCounted {
                 loan_repayment_total += amount;
+                total += amount;
                 continue;
             }
 
-            let text = searchable_text(tx);
-            if let Some((idx, _)) = compiled
-                .iter()
-                .enumerate()
-                .find(|(_, def)| def.regex.is_match(&text))
-            {
-                if compiled[idx].lock_sign_on_first_match {
-                    let is_positive = tx.amount > 0.0;
-                    match &sign_locks[idx] {
-                        None => {
-                            sign_locks[idx] = Some(SignLockState {
-                                expected_positive: is_positive,
-                                first_file: tx.source_file.clone(),
-                                first_line: tx.source_line,
-                            });
-                        }
-                        Some(state) if state.expected_positive != is_positive => {
-                            return Err(anyhow!(
-                                "sign mismatch for summary '{}': first match was {} at '{}' line {}, but found {} at '{}' line {}",
-                                compiled[idx].name,
-                                if state.expected_positive {
-                                    "positive"
-                                } else {
-                                    "negative"
-                                },
-                                state.first_file,
-                                state.first_line,
-                                if is_positive { "positive" } else { "negative" },
-                                tx.source_file,
-                                tx.source_line
-                            ));
-                        }
-                        _ => {}
-                    }
+            if let Some(name) = &tx.summary_name {
+                if let Some(&idx) = name_to_idx.get(name.as_str()) {
+                    let effective = if tx.is_sign_reversed { -amount } else { amount };
+                    totals[idx].total += effective;
+                    total += effective;
                 }
-                totals[idx].total += amount;
             } else {
                 no_match_total += amount;
+                total += amount;
             }
         }
 
@@ -262,82 +330,6 @@ impl CompiledSummarySet {
         Ok(Summary { items: totals })
     }
 
-    pub fn matched_transactions(&self, transactions: &[Transaction]) -> Vec<bool> {
-        let compiled = &self.compiled;
-        let mut matched = vec![false; transactions.len()];
-        for (idx, tx) in transactions.iter().enumerate() {
-            if tx.amount == 0.0
-                || matches!(
-                    tx.class,
-                    TransactionClass::InternalTransfer
-                        | TransactionClass::CardPayment
-                        | TransactionClass::LoanRepaymentOnly
-                )
-            {
-                continue;
-            }
-
-            let text = searchable_text(tx);
-            matched[idx] = tx.class == TransactionClass::LoanRepaymentCounted
-                || compiled.iter().any(|def| def.regex.is_match(&text));
-        }
-        matched
-    }
-
-    pub fn matched_transactions_for_period(
-        &self,
-        transactions: &[Transaction],
-        period_start: NaiveDate,
-        period_end: NaiveDate,
-    ) -> Vec<bool> {
-        let all_matches = self.matched_transactions(transactions);
-        let mut matched = vec![false; transactions.len()];
-        for (idx, tx) in transactions.iter().enumerate() {
-            if tx.date < period_start
-                || tx.date > period_end
-                || tx.amount == 0.0
-                || matches!(
-                    tx.class,
-                    TransactionClass::InternalTransfer
-                        | TransactionClass::CardPayment
-                        | TransactionClass::LoanRepaymentOnly
-                )
-            {
-                continue;
-            }
-            matched[idx] = all_matches[idx];
-        }
-        matched
-    }
-
-    pub fn matched_summary_names(&self, transactions: &[Transaction]) -> Vec<Option<String>> {
-        let compiled = &self.compiled;
-        let mut names = vec![None; transactions.len()];
-        for (idx, tx) in transactions.iter().enumerate() {
-            if tx.amount == 0.0
-                || matches!(
-                    tx.class,
-                    TransactionClass::InternalTransfer
-                        | TransactionClass::CardPayment
-                        | TransactionClass::LoanRepaymentOnly
-                )
-            {
-                continue;
-            }
-
-            if tx.class == TransactionClass::LoanRepaymentCounted {
-                names[idx] = Some(LOAN_REPAYMENT_SUMMARY_NAME.to_string());
-                continue;
-            }
-
-            let text = searchable_text(tx);
-            names[idx] = compiled
-                .iter()
-                .find(|def| def.regex.is_match(&text))
-                .map(|def| def.name.clone());
-        }
-        names
-    }
     pub fn color_map(&self) -> Vec<(String, u32)> {
         self.compiled
             .iter()
@@ -365,6 +357,14 @@ mod tests {
             regex: regex.to_string(),
             color: None,
             lock_sign_on_first_match: true,
+            income: false,
+        }
+    }
+
+    fn def_income(name: &str, regex: &str) -> SummaryDefinition {
+        SummaryDefinition {
+            income: true,
+            ..def(name, regex)
         }
     }
 
@@ -393,7 +393,7 @@ mod tests {
 
     #[test]
     fn summarizes_matching_categories_for_apr_to_may_window() {
-        let txs = vec![
+        let mut txs = vec![
             tx(
                 "1",
                 NaiveDate::from_ymd_opt(2025, 4, 2).unwrap(),
@@ -426,10 +426,9 @@ mod tests {
         let start = NaiveDate::from_ymd_opt(2025, 4, 1).unwrap();
         let end = NaiveDate::from_ymd_opt(2025, 5, 31).unwrap();
         let definitions = default_summary_definitions();
-        let summary = CompiledSummarySet::compile(&definitions)
-            .unwrap()
-            .summarize_for_period(&txs, start, end)
-            .unwrap();
+        let compiled = CompiledSummarySet::compile(&definitions).unwrap();
+        compiled.annotate(&mut txs).unwrap();
+        let summary = compiled.summarize_for_period(&txs, start, end).unwrap();
 
         assert_eq!(summary.items[0].name, "power_payments_total");
         assert_eq!(summary.items[0].total, 120.0);
@@ -444,8 +443,40 @@ mod tests {
     }
 
     #[test]
+    fn annotate_sets_summary_name_on_all_transactions() {
+        let mut txs = vec![
+            tx(
+                "1",
+                NaiveDate::from_ymd_opt(2025, 4, 2).unwrap(),
+                -120.0,
+                "AUTOMATIC PAYMENT",
+                "Power Co",
+                "",
+                "u1",
+            ),
+            tx(
+                "1",
+                NaiveDate::from_ymd_opt(2025, 6, 1).unwrap(),
+                -20.0,
+                "AUTOMATIC PAYMENT",
+                "Unknown",
+                "",
+                "u2",
+            ),
+        ];
+        let compiled = CompiledSummarySet::compile(&default_summary_definitions()).unwrap();
+        let warnings = compiled.annotate(&mut txs).unwrap();
+        assert_eq!(
+            txs[0].summary_name,
+            Some("power_payments_total".to_string())
+        );
+        assert_eq!(txs[1].summary_name, None);
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
     fn tracks_unmatched_transactions_in_no_match() {
-        let txs = vec![tx(
+        let mut txs = vec![tx(
             "1",
             NaiveDate::from_ymd_opt(2025, 4, 10).unwrap(),
             -75.0,
@@ -458,10 +489,9 @@ mod tests {
         let start = NaiveDate::from_ymd_opt(2025, 4, 1).unwrap();
         let end = NaiveDate::from_ymd_opt(2025, 5, 31).unwrap();
         let definitions = default_summary_definitions();
-        let summary = CompiledSummarySet::compile(&definitions)
-            .unwrap()
-            .summarize_for_period(&txs, start, end)
-            .unwrap();
+        let compiled = CompiledSummarySet::compile(&definitions).unwrap();
+        compiled.annotate(&mut txs).unwrap();
+        let summary = compiled.summarize_for_period(&txs, start, end).unwrap();
 
         assert_eq!(summary.items[0].total, 0.0);
         assert_eq!(summary.items[1].total, 0.0);
@@ -474,147 +504,146 @@ mod tests {
     }
 
     #[test]
-    fn marks_only_matching_transactions_for_period() {
-        let txs = vec![
-            tx(
-                "1",
-                NaiveDate::from_ymd_opt(2025, 4, 2).unwrap(),
-                -120.0,
-                "AUTOMATIC PAYMENT",
-                "Power Co",
-                "",
-                "u1",
-            ),
-            tx(
-                "1",
-                NaiveDate::from_ymd_opt(2025, 4, 3).unwrap(),
-                -60.0,
-                "AUTOMATIC PAYMENT",
-                "Unknown",
-                "",
-                "u2",
-            ),
-            tx(
-                "1",
-                NaiveDate::from_ymd_opt(2025, 6, 1).unwrap(),
-                -20.0,
-                "AUTOMATIC PAYMENT",
-                "Power Co",
-                "",
-                "u3",
-            ),
-        ];
-
-        let start = NaiveDate::from_ymd_opt(2025, 4, 1).unwrap();
-        let end = NaiveDate::from_ymd_opt(2025, 5, 31).unwrap();
-        let definitions = default_summary_definitions();
-        let matched = CompiledSummarySet::compile(&definitions)
-            .unwrap()
-            .matched_transactions_for_period(&txs, start, end);
-
-        assert_eq!(matched, vec![true, false, false]);
-    }
-
-    #[test]
-    fn matches_transactions_outside_period_when_requested() {
-        let txs = vec![
-            tx(
-                "1",
-                NaiveDate::from_ymd_opt(2025, 4, 2).unwrap(),
-                -120.0,
-                "AUTOMATIC PAYMENT",
-                "Power Co",
-                "",
-                "u1",
-            ),
-            tx(
-                "1",
-                NaiveDate::from_ymd_opt(2025, 6, 1).unwrap(),
-                -20.0,
-                "AUTOMATIC PAYMENT",
-                "Power Co",
-                "",
-                "u2",
-            ),
-        ];
-
-        let definitions = default_summary_definitions();
-        let matched = CompiledSummarySet::compile(&definitions)
-            .unwrap()
-            .matched_transactions(&txs);
-
-        assert_eq!(matched, vec![true, true]);
-    }
-
-    #[test]
-    fn returns_matched_summary_names_in_order() {
-        let txs = vec![
-            tx(
-                "1",
-                NaiveDate::from_ymd_opt(2025, 4, 2).unwrap(),
-                -120.0,
-                "AUTOMATIC PAYMENT",
-                "Power Co",
-                "",
-                "u1",
-            ),
-            tx(
-                "1",
-                NaiveDate::from_ymd_opt(2025, 4, 3).unwrap(),
-                -60.0,
-                "AUTOMATIC PAYMENT",
-                "Unknown",
-                "",
-                "u2",
-            ),
-        ];
-
-        let definitions = default_summary_definitions();
-        let names = CompiledSummarySet::compile(&definitions)
-            .unwrap()
-            .matched_summary_names(&txs);
-
-        assert_eq!(names[0], Some("power_payments_total".to_string()));
-        assert_eq!(names[1], None);
-    }
-
-    #[test]
-    fn errors_when_summary_matches_mixed_signs() {
+    fn sign_reversal_sets_flag_and_nets_total() {
         let mut t1 = tx(
             "1",
             NaiveDate::from_ymd_opt(2025, 4, 2).unwrap(),
-            -120.0,
+            -150.0,
             "PAYMENT",
+            "Bunnings",
+            "",
+            "u1",
+        );
+        t1.source_file = "file_a.csv".into();
+        t1.source_line = 6;
+        let mut t2 = tx(
+            "1",
+            NaiveDate::from_ymd_opt(2025, 4, 10).unwrap(),
+            20.0,
+            "CREDIT",
+            "Bunnings",
+            "",
+            "u2",
+        );
+        t2.source_file = "file_b.csv".into();
+        t2.source_line = 112;
+
+        let start = NaiveDate::from_ymd_opt(2025, 4, 1).unwrap();
+        let end = NaiveDate::from_ymd_opt(2025, 5, 31).unwrap();
+        let definitions = vec![def("hardware_home_total", "bunnings")];
+        let compiled = CompiledSummarySet::compile(&definitions).unwrap();
+        let mut txs = vec![t1, t2];
+        let warnings = compiled.annotate(&mut txs).unwrap();
+
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].summary_name, "hardware_home_total");
+        assert_eq!(warnings[0].source_file, "file_b.csv");
+        assert_eq!(warnings[0].source_line, 112);
+        assert!(!txs[0].is_sign_reversed);
+        assert!(txs[1].is_sign_reversed);
+
+        let summary = compiled.summarize_for_period(&txs, start, end).unwrap();
+        assert_eq!(summary.items[0].name, "hardware_home_total");
+        assert_eq!(summary.items[0].total, 130.0); // 150 - 20 net
+    }
+
+    #[test]
+    fn first_positive_match_is_fatal() {
+        let mut t1 = tx(
+            "1",
+            NaiveDate::from_ymd_opt(2025, 4, 2).unwrap(),
+            90.0,
+            "CREDIT",
             "Power Co",
             "",
             "u1",
         );
         t1.source_file = "file_a.csv".into();
         t1.source_line = 8;
-        let mut t2 = tx(
-            "1",
-            NaiveDate::from_ymd_opt(2025, 4, 3).unwrap(),
-            90.0,
-            "PAYMENT",
-            "Power Co",
-            "",
-            "u2",
-        );
-        t2.source_file = "file_b.csv".into();
-        t2.source_line = 14;
 
-        let start = NaiveDate::from_ymd_opt(2025, 4, 1).unwrap();
-        let end = NaiveDate::from_ymd_opt(2025, 5, 31).unwrap();
         let definitions = vec![def("power_payments_total", "power")];
         let err = CompiledSummarySet::compile(&definitions)
             .unwrap()
-            .summarize_for_period(&[t1, t2], start, end)
+            .annotate(&mut [t1])
             .unwrap_err()
             .to_string();
 
-        assert!(err.contains("sign mismatch for summary 'power_payments_total'"));
+        assert!(err.contains("misconfigured summary 'power_payments_total'"));
         assert!(err.contains("'file_a.csv' line 8"));
-        assert!(err.contains("'file_b.csv' line 14"));
+    }
+
+    #[test]
+    fn income_summary_accepts_positive_and_warns_on_negative() {
+        let mut txs = vec![
+            {
+                let mut t = tx(
+                    "1",
+                    NaiveDate::from_ymd_opt(2025, 4, 25).unwrap(),
+                    5000.0,
+                    "CREDIT",
+                    "Employer Ltd",
+                    "",
+                    "u1",
+                );
+                t.source_file = "main.csv".into();
+                t.source_line = 8;
+                t
+            },
+            {
+                let mut t = tx(
+                    "1",
+                    NaiveDate::from_ymd_opt(2025, 4, 26).unwrap(),
+                    -50.0,
+                    "DEBIT",
+                    "Employer Ltd",
+                    "",
+                    "u2",
+                );
+                t.source_file = "main.csv".into();
+                t.source_line = 9;
+                t
+            },
+        ];
+
+        let definitions = vec![def_income("salary_total", "employer")];
+        let compiled = CompiledSummarySet::compile(&definitions).unwrap();
+        let warnings = compiled.annotate(&mut txs).unwrap();
+
+        assert!(!txs[0].is_sign_reversed);
+        assert!(txs[1].is_sign_reversed);
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].summary_name, "salary_total");
+        assert_eq!(warnings[0].source_line, 9);
+
+        let start = NaiveDate::from_ymd_opt(2025, 4, 1).unwrap();
+        let end = NaiveDate::from_ymd_opt(2026, 3, 31).unwrap();
+        let summary = compiled.summarize_for_period(&txs, start, end).unwrap();
+        assert_eq!(summary.items[0].total, 4950.0); // 5000 salary - 50 clawback
+    }
+
+    #[test]
+    fn income_summary_fatal_on_first_negative() {
+        let mut t = tx(
+            "1",
+            NaiveDate::from_ymd_opt(2025, 4, 2).unwrap(),
+            -50.0,
+            "DEBIT",
+            "Employer Ltd",
+            "",
+            "u1",
+        );
+        t.source_file = "main.csv".into();
+        t.source_line = 5;
+
+        let definitions = vec![def_income("salary_total", "employer")];
+        let err = CompiledSummarySet::compile(&definitions)
+            .unwrap()
+            .annotate(&mut [t])
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("misconfigured summary 'salary_total'"));
+        assert!(err.contains("'main.csv' line 5"));
     }
 
     #[test]

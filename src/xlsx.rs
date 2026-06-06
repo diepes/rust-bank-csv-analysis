@@ -19,12 +19,13 @@ pub fn write_xlsx(
     summary: &Summary,
 ) -> Result<()> {
     let mut workbook = Workbook::new();
+    let summary_colors: HashMap<String, u32> = summary_set.color_map().into_iter().collect();
     write_transactions_sheet(
         &mut workbook,
         transactions,
         period_start,
         period_end,
-        summary_set,
+        &summary_colors,
     )?;
     write_summary_sheet(&mut workbook, period_start, period_end, summary)?;
     workbook
@@ -38,22 +39,17 @@ fn write_transactions_sheet(
     transactions: &[Transaction],
     period_start: NaiveDate,
     period_end: NaiveDate,
-    summary_set: &CompiledSummarySet,
+    summary_colors: &HashMap<String, u32>,
 ) -> Result<()> {
     let worksheet = workbook.add_worksheet();
     worksheet.set_name("Transactions")?;
-
-    let matched_names = summary_set.matched_summary_names(transactions);
-    let matched_in_period =
-        summary_set.matched_transactions_for_period(transactions, period_start, period_end);
-
-    let summary_colors: HashMap<String, u32> = summary_set.color_map().into_iter().collect();
 
     let fmt_matched_in_period = Format::new().set_background_color(Color::RGB(0xE2F0D9));
     let fmt_matched_outside_period = Format::new().set_background_color(Color::RGB(0xC6EFD6));
     let fmt_loan_repayment = Format::new().set_background_color(Color::RGB(0xD9EAF7));
     let fmt_internal_transfer = Format::new().set_background_color(Color::RGB(0xFFF2CC));
     let fmt_card_payment = Format::new().set_background_color(Color::RGB(0xFFE599));
+    let fmt_sign_reversed = Format::new().set_background_color(Color::RGB(0x9DC3E6));
 
     let headers = [
         "Account Number",
@@ -85,6 +81,7 @@ fn write_transactions_sheet(
 
     for (idx, tx) in transactions.iter().enumerate() {
         let row = (idx + 1) as u32;
+        let in_period = tx.date >= period_start && tx.date <= period_end;
 
         // Row background colour
         match tx.class {
@@ -98,13 +95,15 @@ fn write_transactions_sheet(
                 worksheet.set_row_format(row, &fmt_loan_repayment)?;
             }
             TransactionClass::Countable => {
-                if let Some(name) = matched_names[idx].as_deref() {
+                if tx.is_sign_reversed {
+                    worksheet.set_row_format(row, &fmt_sign_reversed)?;
+                } else if let Some(name) = tx.summary_name.as_deref() {
                     if let Some(rgb) = summary_colors.get(name) {
                         worksheet.set_row_format(
                             row,
                             &Format::new().set_background_color(Color::RGB(*rgb)),
                         )?;
-                    } else if matched_in_period[idx] {
+                    } else if in_period {
                         worksheet.set_row_format(row, &fmt_matched_in_period)?;
                     } else {
                         worksheet.set_row_format(row, &fmt_matched_outside_period)?;
@@ -137,7 +136,7 @@ fn write_transactions_sheet(
         };
         if let Some(l) = label {
             worksheet.write_string(row, 13, l)?;
-        } else if let Some(name) = &matched_names[idx] {
+        } else if let Some(name) = &tx.summary_name {
             worksheet.write_string(row, 13, name.as_str())?;
         }
     }

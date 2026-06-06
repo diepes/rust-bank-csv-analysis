@@ -27,8 +27,16 @@ struct Cli {
 fn run() -> Result<()> {
     let cli = Cli::parse();
     let summary_definitions = resolve_summary_definitions(cli.summary_config.as_ref())?;
-    let transactions = read_transactions(&cli.csv_files)?;
+    let mut transactions = read_transactions(&cli.csv_files)?;
     let summary_set = CompiledSummarySet::compile(&summary_definitions)?;
+
+    let warnings = summary_set.annotate(&mut transactions)?;
+    for w in &warnings {
+        eprintln!(
+            "\x1b[33mwarning:\x1b[0m sign reversal for summary '{}': return credit at '{}' line {}",
+            w.summary_name, w.source_file, w.source_line
+        );
+    }
 
     let start_year = cli
         .tax_year_start

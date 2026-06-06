@@ -8,7 +8,10 @@ pub use detection::{
     classify_transactions, detect_card_payments, detect_internal_transfers, detect_loan_repayments,
 };
 pub use summary::{CompiledSummarySet, parse_summary_color};
-pub use types::{LoanRepaymentFlags, Summary, SummaryDefinition, SummaryItem, TransactionClass};
+pub use types::{
+    LoanRepaymentFlags, SignReversalWarning, Summary, SummaryDefinition, SummaryItem,
+    TransactionClass,
+};
 
 #[cfg(test)]
 mod tests {
@@ -97,10 +100,9 @@ mod tests {
         let start = d(2026, 4, 1);
         let end = d(2026, 5, 31);
         let definitions = default_summary_definitions();
-        let summary = CompiledSummarySet::compile(&definitions)
-            .unwrap()
-            .summarize_for_period(&txs, start, end)
-            .unwrap();
+        let compiled = CompiledSummarySet::compile(&definitions).unwrap();
+        compiled.annotate(&mut txs).unwrap();
+        let summary = compiled.summarize_for_period(&txs, start, end).unwrap();
 
         assert_eq!(summary.items[0].name, "power_payments_total");
         assert_eq!(summary.items[0].total, 120.0);
@@ -160,10 +162,9 @@ mod tests {
         let start = d(2025, 4, 1);
         let end = d(2025, 5, 31);
         let definitions = default_summary_definitions();
-        let summary = CompiledSummarySet::compile(&definitions)
-            .unwrap()
-            .summarize_for_period(&txs, start, end)
-            .unwrap();
+        let compiled = CompiledSummarySet::compile(&definitions).unwrap();
+        compiled.annotate(&mut txs).unwrap();
+        let summary = compiled.summarize_for_period(&txs, start, end).unwrap();
 
         assert_eq!(summary.items[0].name, "power_payments_total");
         assert_eq!(summary.items[0].total, 120.0);
@@ -223,15 +224,11 @@ mod tests {
         classify_transactions(&mut txs);
         let defs = default_summary_definitions();
         let set = CompiledSummarySet::compile(&defs).unwrap();
-        let names = set.matched_summary_names(&txs);
-        assert_eq!(
-            names,
-            vec![
-                Some("loan_repayment_total".into()),
-                None,
-                Some("loan_repayment_total".into()),
-            ]
-        );
+        set.annotate(&mut txs).unwrap();
+        // loan repayment rows get their summary_name set to loan_repayment_total via class
+        assert_eq!(txs[0].class, crate::TransactionClass::LoanRepaymentCounted);
+        assert_eq!(txs[1].class, crate::TransactionClass::LoanRepaymentOnly);
+        assert_eq!(txs[2].class, crate::TransactionClass::LoanRepaymentCounted);
 
         let start = d(2025, 4, 1);
         let end = d(2025, 6, 30);
@@ -282,9 +279,9 @@ mod tests {
 
         classify_transactions(&mut txs);
         let defs = default_summary_definitions();
-        let names = CompiledSummarySet::compile(&defs)
-            .unwrap()
-            .matched_summary_names(&txs);
-        assert_eq!(names, vec![None, None]);
+        let compiled = CompiledSummarySet::compile(&defs).unwrap();
+        compiled.annotate(&mut txs).unwrap();
+        assert_eq!(txs[0].summary_name, None);
+        assert_eq!(txs[1].summary_name, None);
     }
 }

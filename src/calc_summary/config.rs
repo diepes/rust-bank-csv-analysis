@@ -23,6 +23,10 @@ struct SummaryDefinitionBody {
     regex: String,
     #[serde(default, alias = "colour")]
     color: Option<String>,
+    #[serde(default = "default_lock_sign_on_first_match")]
+    lock_sign_on_first_match: bool,
+    #[serde(default)]
+    income: bool,
 }
 
 pub fn default_summary_definitions() -> Vec<SummaryDefinition> {
@@ -33,6 +37,7 @@ pub fn default_summary_definitions() -> Vec<SummaryDefinition> {
             regex: "power".to_string(),
             color: None,
             lock_sign_on_first_match: true,
+            income: false,
         },
         SummaryDefinition {
             name: "mortgage_interest_total".to_string(),
@@ -40,6 +45,7 @@ pub fn default_summary_definitions() -> Vec<SummaryDefinition> {
             regex: "mortgage.*interest|interest.*mortgage".to_string(),
             color: None,
             lock_sign_on_first_match: true,
+            income: false,
         },
     ]
 }
@@ -62,7 +68,8 @@ pub fn load_summary_definitions(path: impl AsRef<Path>) -> Result<Vec<SummaryDef
                 description: body.description,
                 regex: body.regex,
                 color: body.color,
-                lock_sign_on_first_match: default_lock_sign_on_first_match(),
+                lock_sign_on_first_match: body.lock_sign_on_first_match,
+                income: body.income,
             })
             .collect(),
     };
@@ -90,7 +97,8 @@ mod tests {
                     description: body.description,
                     regex: body.regex,
                     color: body.color,
-                    lock_sign_on_first_match: default_lock_sign_on_first_match(),
+                    lock_sign_on_first_match: body.lock_sign_on_first_match,
+                    income: body.income,
                 })
                 .collect(),
         };
@@ -116,7 +124,8 @@ mod tests {
                     description: body.description,
                     regex: body.regex,
                     color: body.color,
-                    lock_sign_on_first_match: default_lock_sign_on_first_match(),
+                    lock_sign_on_first_match: body.lock_sign_on_first_match,
+                    income: body.income,
                 })
                 .collect(),
         };

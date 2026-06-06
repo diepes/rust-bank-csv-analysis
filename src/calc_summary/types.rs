@@ -16,6 +16,13 @@ pub enum TransactionClass {
     LoanRepaymentCounted,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignReversalWarning {
+    pub summary_name: String,
+    pub source_file: String,
+    pub source_line: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct SummaryDefinition {
     pub name: String,
@@ -26,6 +33,11 @@ pub struct SummaryDefinition {
     pub color: Option<String>,
     #[serde(default = "default_lock_sign_on_first_match")]
     pub lock_sign_on_first_match: bool,
+    /// Set to `true` for income categories (e.g. salary) where transactions
+    /// are credits (positive). Flips the sign-lock: first positive is the
+    /// lock, subsequent negatives are sign-reversal warnings.
+    #[serde(default)]
+    pub income: bool,
 }
 
 pub(crate) fn default_lock_sign_on_first_match() -> bool {

@@ -1,6 +1,43 @@
 # rust-bank-csv-analysis
 Load and provide summary of bank csv files
 
+## Pipeline
+
+```
+ CSV files (one per account)     summary.yaml (or built-in defaults)
+          │                                    │
+          ▼                                    ▼
+ read_transactions()              resolve_summary_definitions()
+ • parse rows                     • load YAML config
+ • merge and sort by date         • validate definitions
+ • detect and mark:               • compile regexes once
+     InternalTransfer                          │
+     CardPayment                    CompiledSummarySet
+     LoanRepayment*                            │
+ • tx.class set on each row                   │
+          │                                   │
+          └──────────────┬────────────────────┘
+                         │
+                Vec<Transaction> + CompiledSummarySet
+                         │
+                         ▼
+          summarize_for_period(period_start, period_end)
+          • skip non-Countable transactions
+          • regex-match each tx to a summary category
+          • accumulate totals; detect sign reversals
+                         │
+              Summary + Vec<SignReversalWarning>
+                         │
+                         ▼
+                    write_xlsx()
+          • Transactions sheet: all rows with
+            class / summary colour highlights
+          • Summary sheet: period totals table
+                         │
+                         ▼
+                    output.xlsx
+```
+
 ## Usage
 
 ```bash
@@ -75,7 +112,10 @@ The generated workbook contains:
     - `total`: total of all non-zero transactions in the period (by absolute value)
   - The code validates that configured totals + `loan_repayment_total` + `no_match` equals `total`.
   - By default each summary locks sign on first match (`lock_sign_on_first_match: true`).
-    If a later matched transaction has the opposite sign, processing fails and reports both the first match file/line and offending file/line.
+    If the first matched transaction is **positive** (credit), processing fails immediately — expense
+    summaries expect debits. If a later matched transaction has the opposite sign (e.g. a store return),
+    a **Sign Reversal Warning** is emitted and the transaction is included in the net total; the row is
+    highlighted blue in the Transactions sheet.
 
 ## Transfer Heuristics
 
