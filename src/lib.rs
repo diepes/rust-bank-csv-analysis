@@ -176,8 +176,8 @@ pub fn read_transactions(paths: &[impl AsRef<Path>]) -> Result<Vec<Transaction>>
 pub fn nz_period_for_year(start_year: i32) -> Result<(NaiveDate, NaiveDate)> {
     let start = NaiveDate::from_ymd_opt(start_year, 4, 1)
         .ok_or_else(|| anyhow!("invalid start year {start_year}"))?;
-    let end =
-        NaiveDate::from_ymd_opt(start_year, 5, 31).ok_or_else(|| anyhow!("invalid end date"))?;
+    let end = NaiveDate::from_ymd_opt(start_year + 1, 3, 31)
+        .ok_or_else(|| anyhow!("invalid end date for year {start_year}"))?;
     Ok((start, end))
 }
 
@@ -221,6 +221,13 @@ mod tests {
     fn latest_full_tax_year_start_after_april_first() {
         let date = NaiveDate::from_ymd_opt(2026, 6, 6).unwrap();
         assert_eq!(latest_full_tax_year_start_for_date(date), 2025);
+    }
+
+    #[test]
+    fn nz_period_for_year_spans_april_to_march_next_year() {
+        let (start, end) = nz_period_for_year(2025).unwrap();
+        assert_eq!(start, NaiveDate::from_ymd_opt(2025, 4, 1).unwrap());
+        assert_eq!(end, NaiveDate::from_ymd_opt(2026, 3, 31).unwrap());
     }
 
     #[test]
